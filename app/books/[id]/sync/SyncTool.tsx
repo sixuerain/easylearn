@@ -46,6 +46,9 @@ export default function SyncTool({ bookId, audioUrl, localAudioPath: initialLoca
   const [downloading, setDownloading] = useState(false)
   const [downloadErr, setDownloadErr] = useState('')
   const [audioReady, setAudioReady] = useState(false)
+  const [showCustomUrl, setShowCustomUrl] = useState(false)
+  const [customUrlInput, setCustomUrlInput] = useState('')
+  const [savingUrl, setSavingUrl] = useState(false)
   const audioRef = useRef<HTMLAudioElement>(null)
 
   const currentWord = allWords[currentIdx] ?? null
@@ -107,11 +110,42 @@ export default function SyncTool({ bookId, audioUrl, localAudioPath: initialLoca
       const res = await fetch(`/api/books/${bookId}/audio`, { method: 'POST' })
       const data = await res.json()
       if (data.localPath) setLocalPath(data.localPath)
-      else setDownloadErr(data.error ?? 'Download failed')
+      else {
+        setDownloadErr(data.message ?? data.error ?? 'Download failed')
+        if (data.error === 'streaming_page') setShowCustomUrl(true)
+      }
     } catch {
       setDownloadErr('Network error')
     } finally {
       setDownloading(false)
+    }
+  }
+
+  async function saveCustomUrl() {
+    const url = customUrlInput.trim()
+    if (!url) return
+    setSavingUrl(true)
+    try {
+      await fetch(`/api/books/${bookId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioUrl: url }),
+      })
+      // Try to download and cache locally
+      const res = await fetch(`/api/books/${bookId}/audio`, { method: 'POST' })
+      const data = await res.json()
+      if (data.localPath) {
+        setLocalPath(data.localPath)
+        setShowCustomUrl(false)
+        setDownloadErr('')
+      } else {
+        // Use the URL directly for playback even if can't cache
+        setDownloadErr(data.message ?? data.error ?? '')
+      }
+    } catch {
+      setDownloadErr('Network error')
+    } finally {
+      setSavingUrl(false)
     }
   }
 
@@ -207,18 +241,46 @@ export default function SyncTool({ bookId, audioUrl, localAudioPath: initialLoca
 
           {/* Audio player */}
           <div className="bg-gray-900 border-t border-gray-800 px-4 py-3 flex-shrink-0">
-            {!localPath && audioUrl && (
+            {!localPath && audioUrl && !showCustomUrl && (
               <div className="mb-2 flex items-center gap-2">
                 <p className="text-gray-400 text-xs flex-1">
                   Using remote audio — playback may fail due to CORS.
                 </p>
+                <button onClick={() => setShowCustomUrl(true)}
+                  className="text-xs bg-gray-600 hover:bg-gray-500 text-white px-2 py-1 rounded">
+                  ✏ Custom URL
+                </button>
                 <button onClick={downloadAudio} disabled={downloading}
                   className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded disabled:opacity-50">
                   {downloading ? 'Downloading…' : '⬇ Save locally'}
                 </button>
               </div>
             )}
-            {downloadErr && <p className="text-red-400 text-xs mb-2">{downloadErr}</p>}
+            {showCustomUrl && (
+              <div className="mb-2">
+                <p className="text-gray-400 text-xs mb-1">
+                  Paste a direct audio URL (MP3/AAC/M4A). Open the QR link in browser → DevTools → Network → filter Media to find it.
+                </p>
+                <div className="flex gap-1">
+                  <input
+                    type="url"
+                    value={customUrlInput}
+                    onChange={e => setCustomUrlInput(e.target.value)}
+                    placeholder="https://example.com/audio.mp3"
+                    className="flex-1 bg-gray-800 border border-gray-600 text-white text-xs rounded px-2 py-1.5 min-w-0"
+                  />
+                  <button onClick={saveCustomUrl} disabled={savingUrl || !customUrlInput.trim()}
+                    className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded disabled:opacity-50 whitespace-nowrap">
+                    {savingUrl ? '…' : 'Set'}
+                  </button>
+                  <button onClick={() => setShowCustomUrl(false)}
+                    className="text-xs bg-gray-700 hover:bg-gray-600 text-white px-2 py-1.5 rounded">
+                    ✕
+                  </button>
+                </div>
+              </div>
+            )}
+            {downloadErr && <p className="text-yellow-400 text-xs mb-2">{downloadErr}</p>}
 
             <audio
               ref={audioRef}

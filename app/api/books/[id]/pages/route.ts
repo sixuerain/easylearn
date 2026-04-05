@@ -22,8 +22,14 @@ function greyToRGBA(buf: Buffer, w: number, h: number): Uint8ClampedArray {
  *  1. Standard RGBA scan at multiple resolutions
  *  2. Green-channel scan (catches red/coloured QR codes)
  *  3. Quadrant scans with green channel (catches small QR codes)
+ *
+ * Collects ALL detections and returns the longest result — avoids returning
+ * a truncated URL from a low-resolution scan when a higher-resolution scan
+ * would yield the full URL (including query parameters).
  */
 async function detectQR(buffer: Buffer): Promise<string | null> {
+  const candidates: string[] = []
+
   // Strategy 1: standard full-image RGBA
   for (const size of [800, 1200, 1600]) {
     const { data, info } = await sharp(buffer)
@@ -32,7 +38,7 @@ async function detectQR(buffer: Buffer): Promise<string | null> {
       .raw()
       .toBuffer({ resolveWithObject: true })
     const code = jsQR(new Uint8ClampedArray(data), info.width, info.height)
-    if (code?.data) return code.data
+    if (code?.data) candidates.push(code.data)
   }
 
   // Strategy 2: green channel (red/coloured QR codes have high contrast in green)
@@ -44,7 +50,7 @@ async function detectQR(buffer: Buffer): Promise<string | null> {
       .raw()
       .toBuffer({ resolveWithObject: true })
     const code = jsQR(greyToRGBA(data, info.width, info.height), info.width, info.height)
-    if (code?.data) return code.data
+    if (code?.data) candidates.push(code.data)
   }
 
   // Strategy 3: scan four quadrants with green channel (finds small QR codes)
@@ -67,10 +73,12 @@ async function detectQR(buffer: Buffer): Promise<string | null> {
       .raw()
       .toBuffer({ resolveWithObject: true })
     const code = jsQR(greyToRGBA(data, info.width, info.height), info.width, info.height)
-    if (code?.data) return code.data
+    if (code?.data) candidates.push(code.data)
   }
 
-  return null
+  if (candidates.length === 0) return null
+  // Return the longest result — partial reads at low resolution produce shorter strings
+  return candidates.reduce((a, b) => (a.length >= b.length ? a : b))
 }
 
 export async function POST(
