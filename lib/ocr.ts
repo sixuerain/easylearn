@@ -39,11 +39,11 @@ export async function runOcr(imagePath: string, language = 'en'): Promise<OcrWor
   })
 
   try {
-    const { data } = await worker.recognize(fullPath)
+    // tesseract.js v7: pass explicit output options to get blocks
+    const { data } = await worker.recognize(fullPath, {}, { blocks: true })
     const words: OcrWord[] = []
     let idx = 0
 
-    // tesseract.js v5: words are nested in blocks → paragraphs → lines → words
     for (const block of data.blocks ?? []) {
       for (const para of block.paragraphs ?? []) {
         for (const line of para.lines ?? []) {
