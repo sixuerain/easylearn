@@ -61,7 +61,7 @@ export async function POST(
     data: {
       bookId,
       pageNum: pageCount + 1,
-      imagePath: `/uploads/books/${bookId}/${filename}`,
+      imagePath: `/api/img/books/${bookId}/${filename}`,
     },
   })
 
