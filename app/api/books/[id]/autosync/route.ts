@@ -24,16 +24,16 @@ async function decodeAudio(filePath: string): Promise<Float32Array> {
 }
 
 interface Chunk { text: string; timestamp: [number | null, number | null] }
+interface CharMs { char: string; ms: number }
+interface Anchor { ocrPos: number; whisperPos: number; score: number }
 
-/** Extract CJK characters only */
 const cjkChars = (s: string) =>
   [...s].filter(c => /[\u4e00-\u9fff\u3400-\u4dbf]/.test(c))
+const cjkText = (s: string) => cjkChars(s).join('')
 
-/** CJK bigram set for fuzzy text matching */
-function bigrams(s: string): Set<string> {
-  const chars = cjkChars(s)
+function bigramsOf(s: string): Set<string> {
   const bg = new Set<string>()
-  for (let i = 0; i + 1 < chars.length; i++) bg.add(chars[i] + chars[i + 1])
+  for (let i = 0; i + 1 < s.length; i++) bg.add(s[i] + s[i + 1])
   return bg
 }
 
@@ -49,244 +49,217 @@ async function transcribe(audio: Float32Array, language: string): Promise<Chunk[
   const { pipeline, env } = await import('@xenova/transformers')
   env.cacheDir = path.join(process.cwd(), '.whisper_cache')
   const asr = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base')
+  // Shorter chunks (10s) give much better timestamp resolution than 30s,
+  // especially when there's background music confusing the attention.
   const result = await asr(audio, {
     language,
     task: 'transcribe',
     return_timestamps: true,
-    chunk_length_s: 30,
-    stride_length_s: 5,
+    chunk_length_s: 10,
+    stride_length_s: 2,
   }) as { chunks: Chunk[] }
   return result.chunks ?? []
 }
 
 /**
- * Remove duplicate leading word spans from the OCR word list.
- *
- * Books often have the title printed as a heading on the page, then again
- * as the first word(s) of the content.  The audio only reads it once.
- * We scan for the first occurrence of any leading 1–6 word block appearing
- * again within the next 20 words, and remove the first (heading) block.
+ * Detect when actual speech/audio starts by finding the first sustained
+ * energy above the noise floor.  Returns ms.
+ */
+function detectAudioOnset(audio: Float32Array, sampleRate: number): number {
+  const frameSize = Math.floor(sampleRate * 0.05) // 50ms frames
+  const numFrames = Math.floor(audio.length / frameSize)
+
+  const rms: number[] = []
+  for (let f = 0; f < numFrames; f++) {
+    let sum = 0
+    const off = f * frameSize
+    for (let i = off; i < off + frameSize; i++) sum += audio[i] * audio[i]
+    rms.push(Math.sqrt(sum / frameSize))
+  }
+
+  // Noise floor = 10th percentile of first 2 seconds
+  const first2s = rms.slice(0, Math.floor(2000 / 50))
+  const sorted = [...first2s].sort((a, b) => a - b)
+  const noiseFloor = Math.max(0.0001, sorted[Math.floor(sorted.length * 0.1)] ?? 0.0001)
+
+  // First sustained activity: 3+ consecutive frames above 5× noise floor
+  const threshold = noiseFloor * 5
+  for (let i = 0; i < rms.length - 3; i++) {
+    if (rms[i] > threshold && rms[i + 1] > threshold && rms[i + 2] > threshold) {
+      return i * 50
+    }
+  }
+  return 0
+}
+
+/**
+ * Detect speech onset using energy variance (speech has higher variance
+ * than music because of pauses/consonants). Returns ms.
+ */
+function detectSpeechOnset(audio: Float32Array, sampleRate: number): number {
+  const frameSize = Math.floor(sampleRate * 0.05) // 50ms
+  const numFrames = Math.floor(audio.length / frameSize)
+
+  const rms: number[] = []
+  for (let f = 0; f < numFrames; f++) {
+    let sum = 0
+    const off = f * frameSize
+    for (let i = off; i < off + frameSize; i++) sum += audio[i] * audio[i]
+    rms.push(Math.sqrt(sum / frameSize))
+  }
+
+  // Compute rolling variance of energy (1-second window)
+  const W = 20 // 20 frames = 1s
+  const variances: number[] = []
+  for (let i = 0; i <= rms.length - W; i++) {
+    const win = rms.slice(i, i + W)
+    const mean = win.reduce((a, b) => a + b) / W
+    variances.push(win.reduce((a, e) => a + (e - mean) ** 2, 0) / W)
+  }
+
+  if (variances.length === 0) return 0
+
+  // Speech onset = first time variance exceeds 15% of its maximum
+  const maxVar = Math.max(...variances)
+  const threshold = maxVar * 0.15
+  for (let i = 0; i < variances.length; i++) {
+    if (variances[i] > threshold) return i * 50
+  }
+  return 0
+}
+
+/**
+ * Remove the LONGEST duplicate leading prefix.
  */
 function deduplicateLeadingWords<T extends { text: string }>(words: T[]): T[] {
-  for (let w = 1; w <= 6; w++) {
-    if (words.length < w * 2) break
-    const block1 = words.slice(0, w).map(x => x.text).join('')
-    const limit = Math.min(w * 4 + 1, words.length - w + 1)
-    for (let start = w; start < limit; start++) {
-      const block2 = words.slice(start, start + w).map(x => x.text).join('')
-      if (block1 === block2) {
-        console.log(`[autosync] Dedup: removed leading "${block1}" (duplicate at position ${start})`)
-        return words.slice(w)
-      }
-    }
+  const limit = Math.min(20, words.length)
+  let bestSplit = 0
+  for (let split = 1; split <= Math.min(8, Math.floor(limit / 2)); split++) {
+    const leadingCjk = words.slice(0, split).map(w => cjkText(w.text)).join('')
+    if (leadingCjk.length < 2) continue
+    const restCjk = words.slice(split, limit).map(w => cjkText(w.text)).join('')
+    if (restCjk.includes(leadingCjk)) bestSplit = split
+  }
+  if (bestSplit > 0) {
+    console.log(`[autosync] Dedup: removed first ${bestSplit} words "${cjkText(rawSlice(bestSplit))}"`)
+    return words.slice(bestSplit)
   }
   return words
+
+  function rawSlice(n: number) { return words.slice(0, n).map(w => w.text).join('') }
 }
 
 /**
- * Build a Whisper character timeline.
- *
- * Each valid CJK character in a Whisper segment is assigned an interpolated
- * millisecond timestamp.  Synthetic entries are prepended/appended to ensure
- * the timeline covers [0, audioDurationMs].
+ * Build per-CJK-char timeline from ALL chunks with non-null timestamps.
  */
-function buildTimeline(chunks: Chunk[], audioDurationMs: number): number[] {
-  const timeline: number[] = []
-
+function buildCharTimeline(chunks: Chunk[]): CharMs[] {
+  const result: CharMs[] = []
   for (const c of chunks) {
-    const startMs = (c.timestamp[0] as number) * 1000
-    const endMs   = (c.timestamp[1] as number) * 1000
-    const cjkCount = cjkChars(c.text).length
-    const count   = Math.max(1, cjkCount)
-
-    // Skip hallucination chunks:
-    //  - fewer than 2 CJK chars
-    //  - timestamp gap < 100 ms
-    //  - CJK chars are < 25% of total chars (e.g. "!!!!!!!想出鬼寄来" is mostly noise)
-    if (cjkCount < 2 || endMs - startMs < 100 || cjkCount < c.text.length * 0.25) continue
-
-    const msPerChar = (endMs - startMs) / count
-    for (let i = 0; i < count; i++) {
-      timeline.push(startMs + i * msPerChar)
+    if (c.timestamp[0] == null || c.timestamp[1] == null) continue
+    const startMs = c.timestamp[0] * 1000
+    const endMs = c.timestamp[1] * 1000
+    if (endMs - startMs < 50) continue
+    const chars = cjkChars(c.text)
+    if (chars.length === 0) continue
+    const msPerChar = (endMs - startMs) / chars.length
+    for (let i = 0; i < chars.length; i++) {
+      result.push({ char: chars[i], ms: startMs + i * msPerChar })
     }
   }
-
-  if (timeline.length === 0) return timeline
-
-  // Prepend synthetic entries to cover [0, firstMs) using early-segment pace.
-  const firstMs = timeline[0]
-  if (firstMs > 500) {
-    const sampleLen = Math.min(50, timeline.length - 1)
-    const paceMs = sampleLen > 0
-      ? (timeline[sampleLen] - timeline[0]) / sampleLen
-      : (timeline[timeline.length - 1] - timeline[0]) / Math.max(1, timeline.length - 1)
-    const prependCount = Math.round(firstMs / Math.max(1, paceMs))
-    for (let i = prependCount; i >= 1; i--) {
-      timeline.unshift(Math.round(firstMs - i * paceMs))
-    }
-  }
-
-  // Append synthetic entries to cover [lastMs, audioDurationMs) using late-segment pace.
-  const lastMs = timeline[timeline.length - 1]
-  const tailMs = audioDurationMs - lastMs
-  if (tailMs > 500) {
-    const sampleStart = Math.max(0, timeline.length - 51)
-    const sampleLen = timeline.length - 1 - sampleStart
-    const paceMs = sampleLen > 0
-      ? (timeline[timeline.length - 1] - timeline[sampleStart]) / sampleLen
-      : (timeline[timeline.length - 1] - timeline[0]) / Math.max(1, timeline.length - 1)
-    const appendCount = Math.round(tailMs / Math.max(1, paceMs))
-    for (let i = 1; i <= appendCount; i++) {
-      timeline.push(Math.round(lastMs + i * paceMs))
-    }
-  }
-
-  return timeline
-}
-
-interface Anchor { ocrCumChars: number; ms: number }
-
-/**
- * Match the first `maxAnchors` valid Whisper chunks to their best-fitting
- * position in the OCR word list using CJK bigram Jaccard similarity.
- *
- * Even though Whisper-base Chinese accuracy is low, bigram overlap is enough
- * to identify the rough sentence position.  We search a sliding window of
- * `windowWords` consecutive OCR words against each Whisper chunk text.
- *
- * Returns anchors sorted by ocrCumChars ascending.
- */
-function findAnchors(
-  chunks: Chunk[],
-  words: { text: string }[],
-  cumChars: number[],   // cumulative char count BEFORE each word (length = words.length)
-  maxAnchors: number,
-): Anchor[] {
-  const validChunks = chunks.filter(c =>
-    cjkChars(c.text).length >= 4 &&
-    c.timestamp[0] !== null &&
-    c.timestamp[1] !== null &&
-    (c.timestamp[1] as number) - (c.timestamp[0] as number) >= 0.2 &&
-    cjkChars(c.text).length >= c.text.length * 0.25   // reject hallucinations like "!!!!想出鬼"
-  )
-
-  const anchors: Anchor[] = []
-  const windowWords = 10
-  // Only search first 70% of OCR words (anchors are near the beginning)
-  const searchLimit = Math.max(0, Math.floor(words.length * 0.7) - windowWords)
-
-  for (const chunk of validChunks.slice(0, maxAnchors)) {
-    const chunkBg = bigrams(chunk.text)
-    let bestScore = 0.15  // minimum similarity threshold
-    let bestIdx = -1
-
-    for (let i = 0; i <= searchLimit; i++) {
-      const windowText = words.slice(i, i + windowWords).map(w => w.text).join('')
-      const score = jaccardSim(chunkBg, bigrams(windowText))
-      if (score > bestScore) {
-        bestScore = score
-        bestIdx = i
-      }
-    }
-
-    if (bestIdx >= 0) {
-      const ms = Math.round((chunk.timestamp[0] as number) * 1000)
-      const ocrCumChars = cumChars[bestIdx]
-      anchors.push({ ocrCumChars, ms })
-      console.log(
-        `[autosync] Anchor: OCR word ${bestIdx} (cumChars ${ocrCumChars}) → ${ms}ms` +
-        ` (sim ${bestScore.toFixed(2)}) "${chunk.text.slice(0, 25)}"`
-      )
-    }
-  }
-
-  // Keep anchors sorted and de-duplicate overlaps
-  return anchors
-    .sort((a, b) => a.ocrCumChars - b.ocrCumChars)
-    .filter((a, i, arr) => i === 0 || a.ocrCumChars > arr[i - 1].ocrCumChars)
-}
-
-/**
- * Map OCR words to timestamps using anchor-guided piecewise interpolation.
- *
- * Anchors divide the OCR char range into segments.  Within each segment we
- * look up the corresponding slice of the Whisper timeline and map by proportion.
- * Before the first anchor and after the last anchor we extrapolate at the
- * local speaking pace.
- */
-function mapWordsToTimeline(
-  words: { id: string; text: string }[],
-  timeline: number[],
-  audioDurationMs: number,
-  anchors: Anchor[],
-): { wordId: string; startMs: number; endMs: number }[] {
-
-  // Build cumulative char counts
-  const charCounts  = words.map(w => Math.max(1, cjkChars(w.text).length))
-  const cumChars: number[] = []
-  let cum = 0
-  for (const cc of charCounts) { cumChars.push(cum); cum += cc }
-  const totalOcrChars = cum
-
-  if (timeline.length === 0) {
-    // Fallback: pure proportional
-    return words.map((w, i) => {
-      const startMs = Math.round((cumChars[i] / totalOcrChars) * audioDurationMs)
-      const endMs   = Math.max(startMs + 50,
-        Math.round(((cumChars[i] + charCounts[i]) / totalOcrChars) * audioDurationMs))
-      return { wordId: w.id, startMs, endMs }
-    })
-  }
-
-  // Build segment boundaries: [(ocrStart, ocrEnd, msStart, msEnd), ...]
-  // using anchors as fixed pinned points.
-  const tLen = timeline.length
-  const msToTIdx = (ms: number) =>
-    Math.min(tLen - 1, Math.max(0, Math.round((ms / audioDurationMs) * tLen)))
-
-  // Full segment list: start → anchors → end
-  const pins: { ocrChars: number; ms: number }[] = [
-    { ocrChars: 0, ms: 0 },
-    ...anchors.map(a => ({ ocrChars: a.ocrCumChars, ms: a.ms })),
-    { ocrChars: totalOcrChars, ms: audioDurationMs },
-  ]
-
-  // For each word, find its segment and interpolate
-  const result: { wordId: string; startMs: number; endMs: number }[] = []
-
-  for (let wi = 0; wi < words.length; wi++) {
-    const ocrStart = cumChars[wi]
-    const ocrEnd   = ocrStart + charCounts[wi]
-
-    // Find surrounding pins
-    let seg = pins.length - 2
-    for (let pi = 0; pi < pins.length - 1; pi++) {
-      if (pins[pi + 1].ocrChars > ocrStart) { seg = pi; break }
-    }
-
-    const { ocrChars: segOcrStart, ms: segMsStart } = pins[seg]
-    const { ocrChars: segOcrEnd,   ms: segMsEnd   } = pins[seg + 1]
-
-    const segOcrLen = Math.max(1, segOcrEnd   - segOcrStart)
-    const segMsLen  = Math.max(1, segMsEnd    - segMsStart)
-    const segTStart = msToTIdx(segMsStart)
-    const segTEnd   = msToTIdx(segMsEnd)
-    const segTLen   = Math.max(1, segTEnd - segTStart)
-
-    const fracStart = (ocrStart - segOcrStart) / segOcrLen
-    const fracEnd   = (ocrEnd   - segOcrStart) / segOcrLen
-
-    const tIdxStart = segTStart + fracStart * segTLen
-    const tIdxEnd   = segTStart + fracEnd   * segTLen
-
-    const startMs = timeline[Math.min(Math.floor(tIdxStart), tLen - 1)]
-    const endMs   = Math.max(startMs + 50,
-      timeline[Math.min(Math.floor(tIdxEnd), tLen - 1)])
-
-    result.push({ wordId: words[wi].id, startMs: Math.round(startMs), endMs: Math.round(endMs) })
-  }
-
   return result
+}
+
+/**
+ * Multi-anchor alignment: match OCR segments to whisper text.
+ */
+function findAnchors(ocrStr: string, whisperStr: string): Anchor[] {
+  const segSize = Math.min(20, Math.floor(ocrStr.length / 3), Math.floor(whisperStr.length / 3))
+  if (segSize < 4) return []
+
+  const raw: Anchor[] = []
+  const step = Math.max(4, Math.floor(segSize * 0.5))
+
+  for (let segStart = 0; segStart <= ocrStr.length - segSize; segStart += step) {
+    const segment = ocrStr.slice(segStart, segStart + segSize)
+    const segBg = bigramsOf(segment)
+    let bestScore = 0.15
+    let bestWi = -1
+
+    for (let wi = 0; wi <= whisperStr.length - segSize; wi++) {
+      const score = jaccardSim(segBg, bigramsOf(whisperStr.slice(wi, wi + segSize)))
+      if (score > bestScore) { bestScore = score; bestWi = wi }
+    }
+
+    if (bestWi >= 0) {
+      raw.push({
+        ocrPos: segStart + Math.floor(segSize / 2),
+        whisperPos: bestWi + Math.floor(segSize / 2),
+        score: bestScore,
+      })
+    }
+  }
+
+  // Keep monotonically increasing whisperPos
+  const filtered: Anchor[] = []
+  let lastWp = -Infinity
+  for (const a of raw) {
+    if (a.whisperPos > lastWp) { filtered.push(a); lastWp = a.whisperPos }
+  }
+  return filtered
+}
+
+function ocrToWhisperPos(ocrPos: number, anchors: Anchor[]): number {
+  if (anchors.length === 0) return ocrPos
+
+  if (ocrPos <= anchors[0].ocrPos) {
+    const ratio = anchors.length >= 2
+      ? (anchors[1].whisperPos - anchors[0].whisperPos) / Math.max(1, anchors[1].ocrPos - anchors[0].ocrPos)
+      : 1
+    return anchors[0].whisperPos + (ocrPos - anchors[0].ocrPos) * ratio
+  }
+
+  const last = anchors[anchors.length - 1]
+  if (ocrPos >= last.ocrPos) {
+    const prev = anchors.length >= 2 ? anchors[anchors.length - 2] : { ocrPos: last.ocrPos - 1, whisperPos: last.whisperPos - 1 }
+    const ratio = (last.whisperPos - prev.whisperPos) / Math.max(1, last.ocrPos - prev.ocrPos)
+    return last.whisperPos + (ocrPos - last.ocrPos) * ratio
+  }
+
+  for (let i = 0; i < anchors.length - 1; i++) {
+    if (ocrPos <= anchors[i + 1].ocrPos) {
+      const frac = (ocrPos - anchors[i].ocrPos) / Math.max(1, anchors[i + 1].ocrPos - anchors[i].ocrPos)
+      return anchors[i].whisperPos + frac * (anchors[i + 1].whisperPos - anchors[i].whisperPos)
+    }
+  }
+  return ocrPos
+}
+
+/**
+ * Convert whisper char position to ms, with calibration offset applied.
+ * Extrapolates outside the timeline range.
+ */
+function whisperPosToMs(pos: number, charTimeline: CharMs[], calibrationOffsetMs: number): number {
+  const tLen = charTimeline.length
+  if (tLen === 0) return Math.max(0, pos * 350 + calibrationOffsetMs)
+
+  let ms: number
+  if (pos >= 0 && pos < tLen) {
+    const idx = Math.floor(pos)
+    const frac = pos - idx
+    ms = idx + 1 < tLen
+      ? charTimeline[idx].ms + frac * (charTimeline[idx + 1].ms - charTimeline[idx].ms)
+      : charTimeline[idx].ms
+  } else if (pos < 0) {
+    const sampleEnd = Math.min(30, tLen - 1)
+    const pace = (charTimeline[sampleEnd].ms - charTimeline[0].ms) / Math.max(1, sampleEnd)
+    ms = charTimeline[0].ms + pos * pace
+  } else {
+    const sampleStart = Math.max(0, tLen - 31)
+    const pace = (charTimeline[tLen - 1].ms - charTimeline[sampleStart].ms) / Math.max(1, tLen - 1 - sampleStart)
+    ms = charTimeline[tLen - 1].ms + (pos - tLen + 1) * pace
+  }
+
+  return Math.max(0, ms + calibrationOffsetMs)
 }
 
 export async function POST(
@@ -317,60 +290,135 @@ export async function POST(
     return NextResponse.json({ error: 'No words found. Run OCR on pages first.' }, { status: 400 })
   }
 
-  // Remove duplicate leading title/header words from OCR list
   const words = deduplicateLeadingWords(rawWords)
-  if (words.length < rawWords.length) {
-    console.log(`[autosync] Removed ${rawWords.length - words.length} duplicate leading words`)
-  }
+  const removedCount = rawWords.length - words.length
 
   try {
     console.log('[autosync] Decoding audio…')
     const audio = await decodeAudio(audioPath)
     const audioDurationMs = Math.round((audio.length / 16000) * 1000)
 
+    // Detect actual audio/speech onset from waveform
+    const audioOnsetMs = detectAudioOnset(audio, 16000)
+    const speechOnsetMs = detectSpeechOnset(audio, 16000)
+    console.log(`[autosync] Audio onset: ${audioOnsetMs}ms, Speech onset: ${speechOnsetMs}ms`)
+
     const lang = LANG_MAP[book.language ?? 'zh'] ?? 'chinese'
     const chunks = await transcribe(audio, lang)
 
-    console.log(`[autosync] ${chunks.length} total segments`)
+    console.log(`[autosync] ${chunks.length} Whisper segments`)
     chunks.slice(0, 8).forEach((c, i) =>
-      console.log(`  [${i}] ${c.timestamp[0]}s-${c.timestamp[1]}s  "${c.text.slice(0, 40)}"`)
+      console.log(`  [${i}] ${c.timestamp[0]}s–${c.timestamp[1]}s  "${c.text.slice(0, 50)}"`)
     )
 
-    const rawFirstSec = chunks.find(c => cjkChars(c.text).length >= 2)?.timestamp[0] ?? 0
-    const timeline = buildTimeline(chunks, audioDurationMs)
-    console.log(
-      `[autosync] Whisper first valid segment at ${Math.round((rawFirstSec as number) * 1000)}ms,` +
-      ` extended timeline: ${timeline[0] ?? 0}ms–${timeline[timeline.length - 1] ?? 0}ms (${timeline.length} chars)`
-    )
+    // Build char timeline
+    const charTimeline = buildCharTimeline(chunks)
+    const whisperStr = charTimeline.map(c => c.char).join('')
+    const ocrStr = words.map(w => cjkText(w.text)).join('')
+    const wordCjkLens = words.map(w => Math.max(1, cjkChars(w.text).length))
 
-    // Build cumulative char offsets for OCR words (needed for anchor search)
-    const cumChars: number[] = []
-    let cumC = 0
-    for (const w of words) { cumChars.push(cumC); cumC += Math.max(1, cjkChars(w.text).length) }
+    // Whisper's first CJK timestamp
+    const whisperFirstMs = charTimeline.length > 0 ? charTimeline[0].ms : 0
 
-    // Find anchor points using first 2 Whisper sentences
-    const anchors = findAnchors(chunks, words, cumChars, 2)
+    // Calibration: if Whisper thinks speech starts much later than the
+    // waveform analysis shows, apply a correction offset.
+    // Speech onset from waveform is the ground truth for when narration begins.
+    // Whisper's first timestamp is where IT thinks speech starts.
+    // The difference is the calibration offset.
+    const bestOnset = Math.max(speechOnsetMs, audioOnsetMs)
+    let calibrationOffsetMs = 0
+    if (whisperFirstMs > 0 && bestOnset > 0 && whisperFirstMs > bestOnset + 5000) {
+      // Whisper's first timestamp is >5s later than detected speech onset.
+      // Whisper likely hallucinated/skipped the early part.
+      // Shift all Whisper timestamps backward by the difference.
+      calibrationOffsetMs = bestOnset - whisperFirstMs
+      console.log(`[autosync] CALIBRATION: shifting Whisper timestamps by ${calibrationOffsetMs}ms (onset=${bestOnset}ms, whisper=${whisperFirstMs}ms)`)
+    }
 
-    const timings = mapWordsToTimeline(words, timeline, audioDurationMs, anchors)
+    console.log(`[autosync] Whisper: ${whisperStr.length} CJK chars (${whisperFirstMs.toFixed(0)}ms–${(charTimeline[charTimeline.length - 1]?.ms ?? 0).toFixed(0)}ms)`)
+    console.log(`[autosync] OCR: ${ocrStr.length} CJK chars, ${words.length} words`)
 
-    // Debug: save transcript + sample timings
+    // Multi-anchor alignment
+    const anchors = findAnchors(ocrStr, whisperStr)
+    console.log(`[autosync] Found ${anchors.length} anchors:`)
+    for (const a of anchors) {
+      const rawMs = charTimeline[Math.min(a.whisperPos, charTimeline.length - 1)]?.ms ?? 0
+      const calMs = rawMs + calibrationOffsetMs
+      console.log(`  ocr[${a.ocrPos}]→wh[${a.whisperPos}] raw=${(rawMs / 1000).toFixed(1)}s cal=${(calMs / 1000).toFixed(1)}s score=${a.score.toFixed(2)}`)
+    }
+
+    // Map OCR words → whisper positions → calibrated ms
+    const timings: { wordId: string; startMs: number; endMs: number }[] = []
+    let ocrCharCum = 0
+
+    for (let i = 0; i < words.length; i++) {
+      const ocrStart = ocrCharCum
+      const ocrEnd = ocrCharCum + wordCjkLens[i]
+      ocrCharCum = ocrEnd
+
+      const wPosStart = ocrToWhisperPos(ocrStart, anchors)
+      const wPosEnd = ocrToWhisperPos(ocrEnd, anchors)
+
+      const startMs = Math.round(whisperPosToMs(wPosStart, charTimeline, calibrationOffsetMs))
+      const endMs = Math.max(startMs + 50, Math.round(whisperPosToMs(wPosEnd, charTimeline, calibrationOffsetMs)))
+
+      timings.push({ wordId: words[i].id, startMs, endMs })
+    }
+
+    // Debug output
     const transcriptDir = path.join(process.cwd(), 'storage', 'transcripts')
     mkdirSync(transcriptDir, { recursive: true })
-    writeFileSync(
-      path.join(transcriptDir, `${bookId}.json`),
-      JSON.stringify({
-        audioDurationMs,
-        timelineLength: timeline.length,
-        anchors,
-        chunks,
-        timingSample: timings.slice(0, 20).map((t, i) => ({
-          word: words[i]?.text,
-          startMs: t.startMs,
-          endMs: t.endMs,
-        })),
-      }, null, 2)
-    )
 
+    const lines: string[] = []
+    lines.push(`=== AUTOSYNC DEBUG: ${bookId} ===`)
+    lines.push(`Audio: ${(audioDurationMs / 1000).toFixed(1)}s | Title: "${book.title}"`)
+    lines.push(`Audio onset: ${audioOnsetMs}ms | Speech onset: ${speechOnsetMs}ms`)
+    lines.push(`Whisper first CJK: ${whisperFirstMs.toFixed(0)}ms`)
+    lines.push(`Calibration offset: ${calibrationOffsetMs}ms`)
+    lines.push(`OCR: ${rawWords.length}→${words.length} words (removed ${removedCount}), ${ocrStr.length} CJK`)
+    lines.push(`Whisper: ${whisperStr.length} CJK, ${(charTimeline[0]?.ms ?? 0).toFixed(0)}ms–${(charTimeline[charTimeline.length - 1]?.ms ?? 0).toFixed(0)}ms`)
+    lines.push('')
+    lines.push(`--- ANCHORS (${anchors.length}) ---`)
+    for (const a of anchors) {
+      const rawMs = charTimeline[Math.min(a.whisperPos, charTimeline.length - 1)]?.ms ?? 0
+      lines.push(`  ocr[${a.ocrPos}] → wh[${a.whisperPos}] = ${((rawMs + calibrationOffsetMs) / 1000).toFixed(2)}s (raw ${(rawMs / 1000).toFixed(2)}s)  score=${a.score.toFixed(3)}  ocr="…${ocrStr.slice(Math.max(0, a.ocrPos - 8), a.ocrPos + 8)}…"  wh="…${whisperStr.slice(Math.max(0, a.whisperPos - 8), a.whisperPos + 8)}…"`)
+    }
+    lines.push('')
+    lines.push('--- OCR WORDS → AUDIO TIMESTAMPS ---')
+    lines.push('')
+    ocrCharCum = 0
+    for (let i = 0; i < timings.length; i++) {
+      const t = timings[i]
+      const ocrStart = ocrCharCum
+      ocrCharCum += wordCjkLens[i]
+      const wPos = ocrToWhisperPos(ocrStart, anchors)
+      const inRange = wPos >= 0 && wPos < charTimeline.length
+      const flag = inRange ? '' : ' [extrapolated]'
+      lines.push(`  [${String(i).padStart(3)}] ${(t.startMs / 1000).toFixed(2).padStart(7)}s – ${(t.endMs / 1000).toFixed(2).padStart(7)}s  "${words[i]?.text}"${flag}`)
+    }
+    lines.push('')
+    lines.push('--- WHISPER SEGMENTS ---')
+    lines.push('')
+    for (let i = 0; i < chunks.length; i++) {
+      const c = chunks[i]
+      const cjk = cjkChars(c.text).length
+      const rawStart = c.timestamp[0] != null ? (c.timestamp[0] * 1000).toFixed(0) : '?'
+      const calStart = c.timestamp[0] != null ? ((c.timestamp[0] * 1000 + calibrationOffsetMs) / 1000).toFixed(2) : '?'
+      lines.push(`  [${String(i).padStart(3)}] raw=${rawStart}ms cal=${calStart}s  (${cjk} CJK)  "${c.text.slice(0, 70)}"`)
+    }
+
+    writeFileSync(path.join(transcriptDir, `${bookId}.txt`), lines.join('\n'))
+    writeFileSync(path.join(transcriptDir, `${bookId}.json`), JSON.stringify({
+      audioDurationMs, calibrationOffsetMs, audioOnsetMs, speechOnsetMs,
+      whisperFirstMs, anchors,
+      ocrTimings: timings.map((t, i) => ({
+        word: words[i]?.text,
+        startSec: +(t.startMs / 1000).toFixed(2),
+        endSec: +(t.endMs / 1000).toFixed(2),
+      })),
+    }, null, 2))
+
+    // Save to DB
     await Promise.all(
       timings.map(({ wordId, startMs, endMs }) =>
         prisma.wordTiming.upsert({
@@ -384,10 +432,11 @@ export async function POST(
     return NextResponse.json({
       ok: true,
       wordCount: words.length,
-      segmentCount: chunks.length,
-      timelineChars: timeline.length,
-      timelineStartMs: timeline[0] ?? 0,
-      anchors,
+      removedDuplicates: removedCount,
+      anchorCount: anchors.length,
+      calibrationOffsetMs,
+      audioOnsetMs,
+      speechOnsetMs,
     })
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
