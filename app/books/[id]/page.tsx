@@ -12,7 +12,12 @@ export default async function BookPage({ params }: { params: Promise<{ id: strin
   const { id } = await params
   const book = await prisma.book.findUnique({
     where: { id },
-    include: { pages: { orderBy: { pageNum: 'asc' } } },
+    include: {
+      pages: {
+        orderBy: { pageNum: 'asc' },
+        include: { _count: { select: { words: true } } },
+      },
+    },
   })
 
   if (!book) notFound()

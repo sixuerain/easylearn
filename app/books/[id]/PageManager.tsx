@@ -2,11 +2,13 @@
 
 import { useState, useRef } from 'react'
 import Image from 'next/image'
+import Link from 'next/link'
 
 interface Page {
   id: string
   pageNum: number
   imagePath: string
+  _count: { words: number }
 }
 
 interface Props {
@@ -19,36 +21,27 @@ export default function PageManager({ bookId, initialPages, audioUrl: initialAud
   const [pages, setPages] = useState<Page[]>(initialPages)
   const [audioUrl, setAudioUrl] = useState(initialAudioUrl)
   const [uploading, setUploading] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState('')
   const cameraRef = useRef<HTMLInputElement>(null)
   const galleryRef = useRef<HTMLInputElement>(null)
 
   async function uploadFile(file: File) {
     setUploading(true)
-    setUploadProgress('Uploading…')
     const formData = new FormData()
     formData.append('image', file)
-
     try {
-      const res = await fetch(`/api/books/${bookId}/pages`, {
-        method: 'POST',
-        body: formData,
-      })
+      const res = await fetch(`/api/books/${bookId}/pages`, { method: 'POST', body: formData })
       if (res.ok) {
         const page = await res.json()
-        setPages(prev => [...prev, page])
-        // Check if QR was detected — refetch book to get updated audioUrl
+        setPages(prev => [...prev, { ...page, _count: { words: 0 } }])
+        // Check if QR was detected
         const bookRes = await fetch(`/api/books/${bookId}`)
         if (bookRes.ok) {
           const book = await bookRes.json()
-          if (book.audioUrl && book.audioUrl !== audioUrl) {
-            setAudioUrl(book.audioUrl)
-          }
+          if (book.audioUrl && book.audioUrl !== audioUrl) setAudioUrl(book.audioUrl)
         }
       }
     } finally {
       setUploading(false)
-      setUploadProgress('')
     }
   }
 
@@ -56,9 +49,7 @@ export default function PageManager({ bookId, initialPages, audioUrl: initialAud
     if (!confirm('Delete this page?')) return
     const res = await fetch(`/api/books/${bookId}/pages/${pageId}`, { method: 'DELETE' })
     if (res.ok) {
-      // Renumber locally
-      const next = pages.filter(p => p.id !== pageId).map((p, i) => ({ ...p, pageNum: i + 1 }))
-      setPages(next)
+      setPages(prev => prev.filter(p => p.id !== pageId).map((p, i) => ({ ...p, pageNum: i + 1 })))
     }
   }
 
@@ -69,8 +60,11 @@ export default function PageManager({ bookId, initialPages, audioUrl: initialAud
       body: JSON.stringify({ direction }),
     })
     if (res.ok) {
-      const updated = await res.json()
-      setPages(updated)
+      const updated: Omit<Page, '_count'>[] = await res.json()
+      setPages(prev => {
+        const countMap = Object.fromEntries(prev.map(p => [p.id, p._count]))
+        return updated.map(p => ({ ...p, _count: countMap[p.id] ?? { words: 0 } }))
+      })
     }
   }
 
@@ -92,35 +86,18 @@ export default function PageManager({ bookId, initialPages, audioUrl: initialAud
       )}
 
       {/* Upload buttons */}
-      <input
-        ref={cameraRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        className="hidden"
-        onChange={e => { const f = e.target.files?.[0]; if (f) uploadFile(f); e.target.value = '' }}
-      />
-      <input
-        ref={galleryRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={e => { const f = e.target.files?.[0]; if (f) uploadFile(f); e.target.value = '' }}
-      />
+      <input ref={cameraRef} type="file" accept="image/*" capture="environment" className="hidden"
+        onChange={e => { const f = e.target.files?.[0]; if (f) uploadFile(f); e.target.value = '' }} />
+      <input ref={galleryRef} type="file" accept="image/*" className="hidden"
+        onChange={e => { const f = e.target.files?.[0]; if (f) uploadFile(f); e.target.value = '' }} />
 
       <div className="flex gap-2 mb-5">
-        <button
-          onClick={() => cameraRef.current?.click()}
-          disabled={uploading}
-          className="flex-1 bg-amber-500 hover:bg-amber-600 text-white font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 disabled:opacity-50 transition-colors"
-        >
-          {uploading ? uploadProgress : '📷 Take Photo'}
+        <button onClick={() => cameraRef.current?.click()} disabled={uploading}
+          className="flex-1 bg-amber-500 hover:bg-amber-600 text-white font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 disabled:opacity-50 transition-colors">
+          {uploading ? 'Uploading…' : '📷 Take Photo'}
         </button>
-        <button
-          onClick={() => galleryRef.current?.click()}
-          disabled={uploading}
-          className="flex-1 bg-white hover:bg-gray-50 text-gray-700 font-semibold py-3.5 rounded-xl border border-gray-200 flex items-center justify-center gap-2 disabled:opacity-50 transition-colors"
-        >
+        <button onClick={() => galleryRef.current?.click()} disabled={uploading}
+          className="flex-1 bg-white hover:bg-gray-50 text-gray-700 font-semibold py-3.5 rounded-xl border border-gray-200 flex items-center justify-center gap-2 disabled:opacity-50 transition-colors">
           🖼 Gallery
         </button>
       </div>
@@ -136,37 +113,34 @@ export default function PageManager({ bookId, initialPages, audioUrl: initialAud
           {pages.map((page, idx) => (
             <div key={page.id} className="bg-white rounded-xl shadow overflow-hidden">
               <div className="relative aspect-[3/4] bg-gray-100">
-                <Image
-                  src={page.imagePath}
-                  alt={`Page ${page.pageNum}`}
-                  fill
-                  className="object-cover"
-                  sizes="(max-width: 640px) 50vw, 300px"
-                />
+                <Image src={page.imagePath} alt={`Page ${page.pageNum}`} fill
+                  className="object-cover" sizes="(max-width: 640px) 50vw, 300px" />
+                {/* Page number badge */}
                 <div className="absolute top-1.5 left-1.5 bg-black/50 text-white text-xs font-bold px-2 py-0.5 rounded-full">
                   {page.pageNum}
+                </div>
+                {/* OCR status badge */}
+                <div className={`absolute top-1.5 right-1.5 text-xs font-bold px-1.5 py-0.5 rounded-full ${
+                  page._count.words > 0
+                    ? 'bg-green-500 text-white'
+                    : 'bg-gray-700/70 text-gray-300'
+                }`}>
+                  {page._count.words > 0 ? `${page._count.words}w` : 'OCR?'}
                 </div>
               </div>
               <div className="flex items-center justify-between px-2 py-1.5">
                 <div className="flex gap-0.5">
-                  <button
-                    onClick={() => movePage(page.id, 'up')}
-                    disabled={idx === 0}
-                    className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-gray-700 disabled:opacity-25 rounded"
-                    title="Move up"
-                  >↑</button>
-                  <button
-                    onClick={() => movePage(page.id, 'down')}
-                    disabled={idx === pages.length - 1}
-                    className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-gray-700 disabled:opacity-25 rounded"
-                    title="Move down"
-                  >↓</button>
+                  <button onClick={() => movePage(page.id, 'up')} disabled={idx === 0}
+                    className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-gray-700 disabled:opacity-25 rounded">↑</button>
+                  <button onClick={() => movePage(page.id, 'down')} disabled={idx === pages.length - 1}
+                    className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-gray-700 disabled:opacity-25 rounded">↓</button>
                 </div>
-                <button
-                  onClick={() => deletePage(page.id)}
-                  className="w-7 h-7 flex items-center justify-center text-red-400 hover:text-red-600 rounded text-sm"
-                  title="Delete page"
-                >✕</button>
+                <Link href={`/books/${bookId}/pages/${page.id}/review`}
+                  className="text-xs text-blue-500 hover:text-blue-700 px-1.5 py-1 rounded font-medium">
+                  Review
+                </Link>
+                <button onClick={() => deletePage(page.id)}
+                  className="w-7 h-7 flex items-center justify-center text-red-400 hover:text-red-600 rounded text-sm">✕</button>
               </div>
             </div>
           ))}
