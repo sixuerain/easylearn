@@ -36,35 +36,52 @@ const cjkChars = (s: string) =>
  * hallucination).  Running a separate short pass on the first 30 s recovers
  * those segments.  We merge the two result sets, deduplicating by timestamp.
  */
-async function transcribeTwoPass(audio: Float32Array, language: string): Promise<Chunk[]> {
-  const { pipeline } = await import('@xenova/transformers')
-  const asr = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base', {
-    cache_dir: path.join(process.cwd(), '.whisper_cache'),
-  })
-
-  const opts = {
+async function runWhisper(audio: Float32Array, language: string): Promise<Chunk[]> {
+  // Always create a fresh pipeline to avoid forced_decoder_ids state conflicts
+  // between calls with different audio lengths.
+  const { pipeline, env } = await import('@xenova/transformers')
+  env.cacheDir = path.join(process.cwd(), '.whisper_cache')
+  const asr = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base')
+  const result = await asr(audio, {
     language,
-    task: 'transcribe' as const,
-    return_timestamps: true as const,
+    task: 'transcribe',
+    return_timestamps: true,
     chunk_length_s: 30,
     stride_length_s: 5,
-  }
+  }) as { chunks: Chunk[] }
+  return result.chunks ?? []
+}
 
+/**
+ * Two-pass Whisper transcription.
+ *
+ * The full-audio pass often misses the first 20-30 seconds (music intro causes
+ * hallucination).  Running a separate short pass on the first 30 s recovers
+ * those segments.  We merge the two result sets, deduplicating by timestamp.
+ */
+async function transcribeTwoPass(audio: Float32Array, language: string): Promise<Chunk[]> {
   // Pass 1: full audio
   console.log('[autosync] Whisper pass 1 (full audio)…')
-  const full = (await asr(audio, opts)) as { chunks: Chunk[] }
+  const fullChunks = await runWhisper(audio, language)
 
-  // Pass 2: first 30 s (captures title / intro that full-audio pass misses)
-  console.log('[autosync] Whisper pass 2 (first 30 s)…')
-  const short = (await asr(audio.slice(0, 30 * 16000), { ...opts, chunk_length_s: 30 })) as { chunks: Chunk[] }
+  // Find earliest valid timestamp in full-audio result
+  const firstFullMs = fullChunks
+    .map(c => c.timestamp[0] ?? Infinity)
+    .filter(t => t < Infinity)
+    .reduce((a, b) => Math.min(a, b), Infinity)
 
-  // Merge: keep short-pass chunks whose end time < 26 s (before full-pass coverage)
-  // and all full-pass chunks with valid timestamps
-  const shortChunks = (short.chunks ?? []).filter(c => (c.timestamp[1] ?? 0) < 26)
-  const fullChunks  = (full.chunks  ?? []).filter(c => c.timestamp[0] !== null && c.timestamp[1] !== null)
+  console.log(`[autosync] Full-audio first chunk at ${firstFullMs}s`)
 
-  // Sort by start time
-  const merged = [...shortChunks, ...fullChunks].sort(
+  // Pass 2: first 30 s — only needed if full-audio misses the beginning (> 5s gap)
+  let shortChunks: Chunk[] = []
+  if (firstFullMs > 5) {
+    console.log('[autosync] Whisper pass 2 (first 30 s)…')
+    shortChunks = await runWhisper(audio.slice(0, 30 * 16000), language)
+  }
+
+  // Merge: short-pass chunks whose end < firstFullMs, then full-pass chunks
+  const early = shortChunks.filter(c => (c.timestamp[1] ?? 0) < firstFullMs - 1)
+  const merged = [...early, ...fullChunks].sort(
     (a, b) => (a.timestamp[0] ?? 0) - (b.timestamp[0] ?? 0)
   )
 
