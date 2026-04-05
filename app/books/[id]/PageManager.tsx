@@ -2,6 +2,7 @@
 
 import { useState, useRef } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 
 interface Page {
   id: string
@@ -17,6 +18,7 @@ interface Props {
 }
 
 export default function PageManager({ bookId, initialPages, audioUrl: initialAudioUrl }: Props) {
+  const router = useRouter()
   const [pages, setPages] = useState<Page[]>(initialPages)
   const [audioUrl, setAudioUrl] = useState(initialAudioUrl)
   const [uploading, setUploading] = useState(false)
@@ -36,7 +38,10 @@ export default function PageManager({ bookId, initialPages, audioUrl: initialAud
         const bookRes = await fetch(`/api/books/${bookId}`)
         if (bookRes.ok) {
           const book = await bookRes.json()
-          if (book.audioUrl && book.audioUrl !== audioUrl) setAudioUrl(book.audioUrl)
+          if (book.audioUrl && book.audioUrl !== audioUrl) {
+            setAudioUrl(book.audioUrl)
+            router.refresh()  // re-render server component so Sync button appears
+          }
         }
       }
     } finally {
