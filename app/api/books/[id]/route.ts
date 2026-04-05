@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
+import { rm } from 'fs/promises'
+import path from 'path'
 
 export async function GET(
   _req: Request,
@@ -46,6 +48,13 @@ export async function DELETE(
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { id } = await params
+
+  // Delete book (cascades to pages/words/timings in DB)
   await prisma.book.delete({ where: { id } })
+
+  // Clean up uploaded image files
+  const bookDir = path.join(process.cwd(), 'public', 'uploads', 'books', id)
+  await rm(bookDir, { recursive: true, force: true })
+
   return NextResponse.json({ ok: true })
 }
