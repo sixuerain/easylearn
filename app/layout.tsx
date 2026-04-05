@@ -1,10 +1,7 @@
 import type { Metadata, Viewport } from 'next'
-import { Geist } from 'next/font/google'
 import './globals.css'
 import NextAuthProvider from '@/components/SessionProvider'
 import ServiceWorkerRegistrar from '@/components/ServiceWorkerRegistrar'
-
-const geist = Geist({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
   title: 'EasyLearn',
@@ -26,7 +23,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className="h-full">
-      <body className={`${geist.className} min-h-full`}>
+      <body className="font-sans min-h-full">
         <NextAuthProvider>{children}</NextAuthProvider>
         <ServiceWorkerRegistrar />
       </body>

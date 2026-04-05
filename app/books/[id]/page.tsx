@@ -24,33 +24,45 @@ export default async function BookPage({ params }: { params: Promise<{ id: strin
   if (!book) notFound()
 
   return (
-    <main className="min-h-screen bg-amber-50 p-4">
-      <div className="max-w-2xl mx-auto">
-        {/* Header */}
-        <div className="flex items-center gap-3 mb-5 pt-2">
-          <Link href="/" className="text-amber-600 text-2xl leading-none">←</Link>
-          <div className="flex-1 min-w-0">
-            <h1 className="text-2xl font-bold text-gray-800 truncate">{book.title}</h1>
-            <p className="text-xs text-gray-400 uppercase tracking-wide">{book.language} · {book.pages.length} pages</p>
-          </div>
-          <DeleteBookButton bookId={id} />
-          {book.pages.length > 0 && (
-            <div className="flex gap-2">
-              {book.audioUrl && (
-                <Link href={`/books/${id}/sync`}
-                  className="bg-blue-500 hover:bg-blue-600 text-white font-semibold px-3 py-2 rounded-xl text-sm whitespace-nowrap transition-colors">
-                  🎵 Sync
-                </Link>
-              )}
-              <Link href={`/books/${id}/read`}
-                className="bg-amber-500 hover:bg-amber-600 text-white font-semibold px-3 py-2 rounded-xl text-sm whitespace-nowrap transition-colors">
-                ▶ Read
+    <main className="min-h-screen bg-[#faf8f5] p-4 pb-12">
+      <div className="max-w-lg mx-auto">
+        {/* Compact header */}
+        <header className="flex items-center gap-2 mb-5 pt-1">
+          <Link href="/" className="text-stone-400 hover:text-stone-600 transition-colors" aria-label="Back">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M15 18l-6-6 6-6" />
+            </svg>
+          </Link>
+          <h1 className="flex-1 text-xl font-bold text-stone-800 truncate font-hand">{book.title}</h1>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <DeleteBookButton bookId={id} />
+            {book.pages.length > 0 && book.audioUrl && (
+              <Link
+                href={`/books/${id}/sync`}
+                className="text-xs font-medium text-amber-700 bg-amber-100 hover:bg-amber-200 px-2.5 py-1.5 rounded-lg transition-colors"
+              >
+                Sync
               </Link>
-            </div>
-          )}
-        </div>
+            )}
+            {book.pages.length > 0 && (
+              <Link
+                href={`/books/${id}/read`}
+                className="text-xs font-medium text-white bg-amber-500 hover:bg-amber-600 px-2.5 py-1.5 rounded-lg transition-colors"
+              >
+                Read
+              </Link>
+            )}
+          </div>
+        </header>
 
-        <PageManager bookId={id} initialPages={book.pages} audioUrl={book.audioUrl} />
+        <PageManager
+          bookId={id}
+          initialPages={book.pages}
+          audioUrl={book.audioUrl}
+          bookTitle={book.title}
+          bookLanguage={book.language}
+          createdAt={book.createdAt.toISOString()}
+        />
       </div>
     </main>
   )
