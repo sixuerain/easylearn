@@ -46,7 +46,8 @@ export default function PageManager({
   const [deleting, setDeleting] = useState(false)
   const [infoOpen, setInfoOpen] = useState(false)
   const [addOpen, setAddOpen] = useState(false)
-  const [preview, setPreview] = useState<Page | null>(null)
+  const [previewIdx, setPreviewIdx] = useState<number | null>(null)
+  const touchStartX = useRef<number | null>(null)
   const cameraRef = useRef<HTMLInputElement>(null)
   const galleryRef = useRef<HTMLInputElement>(null)
   const addMenuRef = useRef<HTMLDivElement>(null)
@@ -64,20 +65,29 @@ export default function PageManager({
   }, [addOpen])
 
   useEffect(() => {
-    if (!preview) return
+    if (previewIdx === null) return
     const prev = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => { document.body.style.overflow = prev }
-  }, [preview])
+  }, [previewIdx])
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key !== 'Escape') return
-      setPreview(null); setInfoOpen(false); setAddOpen(false)
+      if (e.key === 'Escape') {
+        setPreviewIdx(null); setInfoOpen(false); setAddOpen(false)
+        return
+      }
+      if (previewIdx === null) return
+      if (e.key === 'ArrowLeft' && previewIdx > 0) {
+        e.preventDefault(); setPreviewIdx(i => Math.max(0, (i ?? 0) - 1))
+      }
+      if (e.key === 'ArrowRight' && previewIdx < pages.length - 1) {
+        e.preventDefault(); setPreviewIdx(i => Math.min(pages.length - 1, (i ?? 0) + 1))
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [previewIdx, pages.length])
 
   async function uploadFile(file: File) {
     setUploading(true); setAddOpen(false)
@@ -170,13 +180,13 @@ export default function PageManager({
 
           {/* Page grid — 3 columns, compact cards */}
           <div className="grid grid-cols-3 gap-2.5">
-            {pages.map(page => {
+            {pages.map((page, idx) => {
               const isSelected = selected.has(page.id)
               return (
                 <div key={page.id} className="group relative">
                   <button
                     type="button"
-                    onClick={() => setPreview(page)}
+                    onClick={() => setPreviewIdx(idx)}
                     className={`
                       w-full rounded-xl overflow-hidden transition-all duration-150
                       bg-white shadow-sm hover:shadow-md
@@ -195,15 +205,10 @@ export default function PageManager({
                       />
                     </div>
                     {/* Label strip */}
-                    <div className="px-2 py-1.5 flex items-center justify-between gap-1 bg-white">
-                      <span className="text-xs text-stone-500 font-hand truncate">
+                    <div className="px-2 py-1.5 bg-white">
+                      <span className="text-xs text-stone-500 font-hand">
                         P{page.pageNum}
                       </span>
-                      {page._count.words > 0 && (
-                        <span className="text-[10px] text-stone-400 font-hand">
-                          {page._count.words}w
-                        </span>
-                      )}
                     </div>
                   </button>
                   {/* Selection checkbox — top-left corner overlay */}
@@ -320,34 +325,86 @@ export default function PageManager({
         </div>
       )}
 
-      {/* Full-screen preview */}
-      {preview && (
+      {/* Full-screen preview with navigation */}
+      {previewIdx !== null && pages[previewIdx] && (
         <div
           className="fixed inset-0 z-[60] flex flex-col bg-black/95"
-          role="dialog" aria-modal="true" aria-label={`Page ${preview.pageNum} preview`}
+          role="dialog" aria-modal="true" aria-label={`Page ${pages[previewIdx].pageNum} preview`}
+          onTouchStart={e => { touchStartX.current = e.touches[0].clientX }}
+          onTouchEnd={e => {
+            if (touchStartX.current === null) return
+            const dx = e.changedTouches[0].clientX - touchStartX.current
+            touchStartX.current = null
+            if (Math.abs(dx) < 50) return
+            if (dx < 0 && previewIdx < pages.length - 1) setPreviewIdx(previewIdx + 1)
+            if (dx > 0 && previewIdx > 0) setPreviewIdx(previewIdx - 1)
+          }}
         >
-          <div className="flex items-center justify-between px-4 py-3 text-white/80">
-            <span className="text-base font-hand">Page {preview.pageNum}</span>
+          {/* Header */}
+          <div className="flex items-center justify-between px-4 py-3 text-white/80 shrink-0">
+            <span className="text-base font-hand">Page {pages[previewIdx].pageNum} / {pages.length}</span>
             <button
               type="button"
-              onClick={() => setPreview(null)}
+              onClick={() => setPreviewIdx(null)}
               className="text-sm text-white/60 hover:text-white transition-colors"
             >
               Close
             </button>
           </div>
-          <div
-            className="flex-1 flex items-center justify-center p-3 min-h-0 cursor-zoom-out"
-            onClick={() => setPreview(null)}
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={preview.imagePath}
-              alt={`Page ${preview.pageNum}`}
-              className="max-h-full max-w-full object-contain rounded-lg"
-              onClick={e => e.stopPropagation()}
-            />
+
+          {/* Image area with prev/next tap zones */}
+          <div className="flex-1 flex items-center justify-center min-h-0 relative">
+            {/* Left tap zone */}
+            {previewIdx > 0 && (
+              <button
+                type="button"
+                onClick={() => setPreviewIdx(previewIdx - 1)}
+                className="absolute left-0 top-0 bottom-0 w-1/5 z-10 flex items-center justify-start pl-2 text-white/0 hover:text-white/50 transition-colors"
+                aria-label="Previous page"
+              >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
+              </button>
+            )}
+            {/* Right tap zone */}
+            {previewIdx < pages.length - 1 && (
+              <button
+                type="button"
+                onClick={() => setPreviewIdx(previewIdx + 1)}
+                className="absolute right-0 top-0 bottom-0 w-1/5 z-10 flex items-center justify-end pr-2 text-white/0 hover:text-white/50 transition-colors"
+                aria-label="Next page"
+              >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+              </button>
+            )}
+            {/* Image */}
+            <div className="p-3 max-h-full max-w-full">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={pages[previewIdx].imagePath}
+                alt={`Page ${pages[previewIdx].pageNum}`}
+                className="max-h-[calc(100vh-6rem)] max-w-full object-contain rounded-lg"
+              />
+            </div>
           </div>
+
+          {/* Page dots */}
+          {pages.length > 1 && (
+            <div className="flex justify-center gap-1.5 py-3 shrink-0">
+              {pages.map((_, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => setPreviewIdx(i)}
+                  className={`rounded-full transition-all ${
+                    i === previewIdx
+                      ? 'w-2 h-2 bg-amber-400'
+                      : 'w-1.5 h-1.5 bg-white/30 hover:bg-white/50'
+                  }`}
+                  aria-label={`Go to page ${i + 1}`}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
