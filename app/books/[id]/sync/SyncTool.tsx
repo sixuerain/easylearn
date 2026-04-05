@@ -49,6 +49,8 @@ export default function SyncTool({ bookId, audioUrl, localAudioPath: initialLoca
   const [showCustomUrl, setShowCustomUrl] = useState(false)
   const [customUrlInput, setCustomUrlInput] = useState('')
   const [savingUrl, setSavingUrl] = useState(false)
+  const [autoSyncing, setAutoSyncing] = useState(false)
+  const [autoSyncMsg, setAutoSyncMsg] = useState('')
   const audioRef = useRef<HTMLAudioElement>(null)
 
   const currentWord = allWords[currentIdx] ?? null
@@ -121,6 +123,26 @@ export default function SyncTool({ bookId, audioUrl, localAudioPath: initialLoca
     }
   }
 
+  async function autoSync() {
+    setAutoSyncing(true)
+    setAutoSyncMsg('')
+    try {
+      const res = await fetch(`/api/books/${bookId}/autosync`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      const data = await res.json()
+      if (data.ok) {
+        setAutoSyncMsg(`✓ Auto-synced ${data.wordCount} words across ${(data.totalMs / 1000).toFixed(1)}s`)
+        // Reload to show updated timings
+        window.location.reload()
+      } else {
+        setAutoSyncMsg(`✗ ${data.error}`)
+      }
+    } catch {
+      setAutoSyncMsg('✗ Network error')
+    } finally {
+      setAutoSyncing(false)
+    }
+  }
+
   async function saveCustomUrl() {
     const url = customUrlInput.trim()
     if (!url) return
@@ -176,7 +198,14 @@ export default function SyncTool({ bookId, audioUrl, localAudioPath: initialLoca
         <div className="flex-1">
           <p className="text-white font-medium text-sm">Audio Sync</p>
           <p className="text-gray-400 text-xs">{stamped}/{total} words stamped</p>
+          {autoSyncMsg && <p className="text-xs mt-0.5" style={{ color: autoSyncMsg.startsWith('✓') ? '#86efac' : '#fca5a5' }}>{autoSyncMsg}</p>}
         </div>
+        {localPath && total > 0 && (
+          <button onClick={autoSync} disabled={autoSyncing}
+            className="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white text-xs font-bold px-3 py-1.5 rounded-lg">
+            {autoSyncing ? '⏳ Syncing…' : '⚡ Auto'}
+          </button>
+        )}
         {stamped === total && total > 0 && (
           <Link href={`/books/${bookId}/read`}
             className="bg-green-500 hover:bg-green-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg">

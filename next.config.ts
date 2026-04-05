@@ -1,7 +1,7 @@
 import type { NextConfig } from 'next'
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ['sharp', 'better-sqlite3', 'tesseract.js', 'playwright-core'],
+  serverExternalPackages: ['sharp', 'better-sqlite3', 'tesseract.js', 'playwright-core', 'music-metadata'],
   images: {
     unoptimized: true,
   },
