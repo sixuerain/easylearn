@@ -29,7 +29,7 @@ export async function DELETE(
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { pageId, wordId } = await params
-  await prisma.word.delete({ where: { id: wordId } })
+  await prisma.word.deleteMany({ where: { id: wordId } })
 
   // Renumber remaining words
   const remaining = await prisma.word.findMany({
