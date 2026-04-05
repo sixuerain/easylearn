@@ -1,0 +1,53 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id       String @id @default(cuid())
+  username String @unique
+  password String
+}
+
+model Book {
+  id        String   @id @default(cuid())
+  title     String
+  language  String   @default("en")
+  audioUrl  String?
+  createdAt DateTime @default(now())
+  pages     Page[]
+}
+
+model Page {
+  id        String @id @default(cuid())
+  bookId    String
+  pageNum   Int
+  imagePath String
+  words     Word[]
+  book      Book   @relation(fields: [bookId], references: [id], onDelete: Cascade)
+}
+
+model Word {
+  id       String      @id @default(cuid())
+  pageId   String
+  text     String
+  x        Float
+  y        Float
+  w        Float
+  h        Float
+  orderIdx Int
+  timing   WordTiming?
+  page     Page        @relation(fields: [pageId], references: [id], onDelete: Cascade)
+}
+
+model WordTiming {
+  id      String @id @default(cuid())
+  wordId  String @unique
+  startMs Int
+  endMs   Int
+  word    Word   @relation(fields: [wordId], references: [id], onDelete: Cascade)
+}
