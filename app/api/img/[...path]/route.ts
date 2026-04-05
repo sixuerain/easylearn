@@ -17,9 +17,9 @@ export async function GET(
     return new NextResponse('Not found', { status: 404 })
   }
 
-  const filePath = path.join(process.cwd(), 'public', 'uploads', ...segments)
+  const filePath = path.join(process.cwd(), 'storage', 'books', ...segments.slice(1))
   // Prevent path traversal
-  const uploadsRoot = path.join(process.cwd(), 'public', 'uploads')
+  const uploadsRoot = path.join(process.cwd(), 'storage', 'books')
   if (!filePath.startsWith(uploadsRoot)) {
     return new NextResponse('Forbidden', { status: 403 })
   }

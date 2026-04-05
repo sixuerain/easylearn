@@ -92,7 +92,7 @@ export async function POST(
   const existing = getLocalAudioPath(id)
   if (existing) return NextResponse.json({ localPath: existing })
 
-  const dir = path.join(process.cwd(), 'public', 'uploads', 'audio')
+  const dir = path.join(process.cwd(), 'storage', 'audio')
   await mkdir(dir, { recursive: true })
 
   try {

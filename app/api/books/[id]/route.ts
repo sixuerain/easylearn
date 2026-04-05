@@ -53,7 +53,7 @@ export async function DELETE(
   await prisma.book.delete({ where: { id } })
 
   // Clean up uploaded image files
-  const bookDir = path.join(process.cwd(), 'public', 'uploads', 'books', id)
+  const bookDir = path.join(process.cwd(), 'storage', 'books', id)
   await rm(bookDir, { recursive: true, force: true })
 
   return NextResponse.json({ ok: true })

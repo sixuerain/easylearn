@@ -40,8 +40,9 @@ yarn-error.log*
 dev.db
 dev.db-journal
 
-# uploads
-/public/uploads/*
+# runtime storage (user uploads, system-downloaded audio)
+/storage/*
+!/storage/.gitkeep
 
 # tesseract language data cache
 .tesseract/

@@ -17,8 +17,8 @@ export async function GET(
   const { path: segments } = await params
   if (!segments?.length) return new NextResponse('Not found', { status: 404 })
 
-  const filePath = path.join(process.cwd(), 'public', 'uploads', 'audio', ...segments)
-  const uploadsRoot = path.join(process.cwd(), 'public', 'uploads', 'audio')
+  const filePath = path.join(process.cwd(), 'storage', 'audio', ...segments)
+  const uploadsRoot = path.join(process.cwd(), 'storage', 'audio')
   if (!filePath.startsWith(uploadsRoot)) {
     return new NextResponse('Forbidden', { status: 403 })
   }

@@ -106,7 +106,7 @@ export async function POST(
     .toBuffer()
 
   // Save to disk
-  const dir = path.join(process.cwd(), 'public', 'uploads', 'books', bookId)
+  const dir = path.join(process.cwd(), 'storage', 'books', bookId)
   await mkdir(dir, { recursive: true })
   const fileId = crypto.randomUUID()
   const filename = `${fileId}.jpg`
