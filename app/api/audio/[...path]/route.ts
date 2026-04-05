@@ -40,9 +40,18 @@ export async function GET(
       const stream = createReadStream(filePath, { start, end })
       const webStream = new ReadableStream({
         start(controller) {
-          stream.on('data', chunk => controller.enqueue(chunk))
-          stream.on('end', () => controller.close())
-          stream.on('error', err => controller.error(err))
+          stream.on('data', chunk => {
+            try { controller.enqueue(chunk) } catch { /* client disconnected */ }
+          })
+          stream.on('end', () => {
+            try { controller.close() } catch { /* already closed */ }
+          })
+          stream.on('error', err => {
+            try { controller.error(err) } catch { /* already closed */ }
+          })
+        },
+        cancel() {
+          stream.destroy()
         },
       })
       return new NextResponse(webStream, {

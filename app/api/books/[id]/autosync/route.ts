@@ -11,7 +11,6 @@ const LANG_MAP: Record<string, string> = {
   en: 'english', es: 'spanish', fr: 'french',
 }
 
-/** Decode MP3 to mono Float32Array at 16kHz using node-web-audio-api */
 async function decodeAudio(filePath: string): Promise<Float32Array> {
   const { AudioContext } = await import('node-web-audio-api')
   const ctx = new AudioContext({ sampleRate: 16000 })
@@ -22,9 +21,8 @@ async function decodeAudio(filePath: string): Promise<Float32Array> {
   return audio
 }
 
-interface Chunk { text: string; timestamp: [number, number] }
+interface Chunk { text: string; timestamp: [number | null, number | null] }
 
-/** Run Whisper on the audio, return segments with [startS, endS] timestamps */
 async function transcribe(audio: Float32Array, language: string): Promise<Chunk[]> {
   const { pipeline } = await import('@xenova/transformers')
   const asr = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base', {
@@ -40,94 +38,157 @@ async function transcribe(audio: Float32Array, language: string): Promise<Chunk[
   return result.chunks ?? []
 }
 
-/** Keep only CJK characters for alignment counting */
+/** Extract CJK characters only */
 const cjkChars = (s: string) =>
-  [...s].filter(c => /[\u4e00-\u9fff\u3400-\u4dbf]/u.test(c))
+  [...s].filter(c => /[\u4e00-\u9fff\u3400-\u4dbf]/.test(c))
 
-/**
- * Find the index of the first Whisper chunk that best matches the first OCR sentence.
- * This handles audio that starts with a title or intro not present in OCR pages.
- *
- * Strategy: slide through Whisper chunks and find the one whose text has the most
- * character overlap with the first OCR text.
- */
-function findAudioStartChunk(chunks: Chunk[], firstOcrText: string): number {
-  const ocrChars = new Set(cjkChars(firstOcrText))
-  let bestIdx = 0
-  let bestScore = -1
+/** Build character bigrams for fuzzy matching */
+function bigrams(chars: string[]): Set<string> {
+  const s = new Set<string>()
+  for (let i = 0; i < chars.length - 1; i++) s.add(chars[i] + chars[i + 1])
+  return s
+}
 
-  for (let i = 0; i < Math.min(chunks.length, 20); i++) {
-    const whisperChars = cjkChars(chunks[i].text)
-    const overlap = whisperChars.filter(c => ocrChars.has(c)).length
-    const score = overlap / Math.max(1, ocrChars.size)
-    if (score > bestScore) {
-      bestScore = score
-      bestIdx = i
-    }
-    // Good enough match
-    if (score > 0.5) break
-  }
+/** Jaccard similarity between two bigram sets */
+function jaccardBigrams(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 0
+  let inter = 0
+  for (const x of a) if (b.has(x)) inter++
+  return inter / (a.size + b.size - inter)
+}
 
-  return bestIdx
+interface Anchor {
+  ocrWordIdx: number   // first OCR word in this segment
+  startMs: number
+  endMs: number
+  ocrWordCount: number // how many OCR words this segment spans
 }
 
 /**
- * Align OCR words to Whisper segment timestamps.
- *
- * Maps OCR character positions proportionally to Whisper character positions,
- * using segment boundaries as time anchors. Starts from `startChunkIdx` to
- * skip audio intro/title not present in the OCR.
+ * Match Whisper chunks to OCR words using bigram fingerprints.
+ * Returns anchor points: (ocrWordIdx, startMs, endMs) for each matched chunk.
+ * Enforces monotonicity so anchors never go backwards in OCR word order.
  */
-function alignWordsToChunks(
-  ocrWords: { id: string; text: string }[],
+function findAnchors(
+  words: { id: string; text: string }[],
   chunks: Chunk[],
-  startChunkIdx: number,
-): { wordId: string; startMs: number; endMs: number }[] {
-  const activeChunks = chunks.slice(startChunkIdx)
+  audioDurationMs: number,
+): Anchor[] {
+  // Filter hallucination chunks (< 3 CJK chars or null timestamps)
+  const validChunks = chunks.filter(c =>
+    c.timestamp[0] !== null &&
+    c.timestamp[1] !== null &&
+    cjkChars(c.text).length >= 3
+  )
 
-  const ocrCounts   = ocrWords.map(w => Math.max(1, cjkChars(w.text).length))
-  const chunkCounts = activeChunks.map(c => Math.max(1, cjkChars(c.text).length))
+  const anchors: Anchor[] = []
+  let minOcrIdx = 0  // enforce monotonicity
 
-  const totalOcr     = ocrCounts.reduce((a, b) => a + b, 0)
-  const totalWhisper = chunkCounts.reduce((a, b) => a + b, 0)
-
-  function whisperPosToMs(pos: number): number {
-    let cum = 0
-    for (let i = 0; i < activeChunks.length; i++) {
-      const next = cum + chunkCounts[i]
-      const c = activeChunks[i]
-      if (pos <= next || i === activeChunks.length - 1) {
-        const frac = chunkCounts[i] > 0 ? Math.min(1, (pos - cum) / chunkCounts[i]) : 0
-        return Math.round((c.timestamp[0] + frac * (c.timestamp[1] - c.timestamp[0])) * 1000)
-      }
-      cum = next
-    }
-    return Math.round(activeChunks[activeChunks.length - 1].timestamp[1] * 1000)
+  // Pre-compute OCR bigrams for each word's neighbourhood (sliding window)
+  const WINDOW = 18  // OCR words per match window
+  const ocrWindowBigrams: Set<string>[] = []
+  for (let i = 0; i < words.length; i++) {
+    const winText = words.slice(i, i + WINDOW).map(w => w.text).join('')
+    ocrWindowBigrams.push(bigrams(cjkChars(winText)))
   }
 
+  for (const chunk of validChunks) {
+    const chunkBG = bigrams(cjkChars(chunk.text))
+    if (chunkBG.size === 0) continue
+
+    let bestScore = 0.12  // minimum threshold
+    let bestIdx = -1
+
+    // Search OCR words from minOcrIdx, allow up to 120 words lookahead
+    const limit = Math.min(words.length - WINDOW, minOcrIdx + 120)
+    for (let wi = minOcrIdx; wi <= limit; wi++) {
+      const score = jaccardBigrams(chunkBG, ocrWindowBigrams[wi])
+      if (score > bestScore) {
+        bestScore = score
+        bestIdx = wi
+      }
+    }
+
+    if (bestIdx < 0) continue
+
+    // Estimate how many OCR words this chunk covers (proportional to CJK char count)
+    const chunkCjkCount = cjkChars(chunk.text).length
+    const ocrCharsInWindow = cjkChars(words.slice(bestIdx, bestIdx + WINDOW).map(w => w.text).join('')).length
+    const wordCount = Math.max(1, Math.round((chunkCjkCount / Math.max(1, ocrCharsInWindow)) * WINDOW))
+
+    anchors.push({
+      ocrWordIdx: bestIdx,
+      startMs: Math.round((chunk.timestamp[0] as number) * 1000),
+      endMs:   Math.round((chunk.timestamp[1] as number) * 1000),
+      ocrWordCount: wordCount,
+    })
+
+    // Advance minimum search position (allow slight overlap for inaccurate matches)
+    minOcrIdx = Math.max(minOcrIdx, bestIdx + Math.max(1, wordCount - 3))
+  }
+
+  return anchors
+}
+
+/**
+ * Given anchor points, assign a timestamp to every OCR word by interpolation.
+ * - Words before first anchor: distributed proportionally in [0, firstAnchor.startMs]
+ * - Words between anchors: distributed proportionally between the two anchors
+ * - Words after last anchor: distributed proportionally in [lastAnchor.endMs, audioDurationMs]
+ */
+function assignTimings(
+  words: { id: string; text: string }[],
+  anchors: Anchor[],
+  audioDurationMs: number,
+): { wordId: string; startMs: number; endMs: number }[] {
+
+  // Collapse anchors into (ocrWordIdx, ms) pairs
+  // Each anchor gives us the start time of a group of OCR words
+  const pts: { wordIdx: number; ms: number }[] = [{ wordIdx: 0, ms: 0 }]
+  for (const a of anchors) {
+    pts.push({ wordIdx: a.ocrWordIdx, ms: a.startMs })
+    pts.push({ wordIdx: a.ocrWordIdx + a.ocrWordCount, ms: a.endMs })
+  }
+  pts.push({ wordIdx: words.length, ms: audioDurationMs })
+
+  // Deduplicate & sort by wordIdx
+  const sorted = pts
+    .sort((a, b) => a.wordIdx - b.wordIdx || a.ms - b.ms)
+    .filter((p, i, arr) => i === 0 || p.wordIdx > arr[i - 1].wordIdx)
+
+  // For each word, find its interpolation segment and compute timing
+  const charCounts = words.map(w => Math.max(1, cjkChars(w.text).length))
   const result: { wordId: string; startMs: number; endMs: number }[] = []
-  let ocrCum = 0
 
-  for (let i = 0; i < ocrWords.length; i++) {
-    const wStart = (ocrCum / totalOcr) * totalWhisper
-    const wEnd   = ((ocrCum + ocrCounts[i]) / totalOcr) * totalWhisper
+  let ptIdx = 0
+  let charCumInSeg = 0
 
-    const startMs = whisperPosToMs(wStart)
-    const endMs   = Math.max(startMs + 50, whisperPosToMs(wEnd))
+  for (let wi = 0; wi < words.length; wi++) {
+    // Advance to the right segment
+    while (ptIdx + 1 < sorted.length - 1 && wi >= sorted[ptIdx + 1].wordIdx) {
+      ptIdx++
+      charCumInSeg = 0
+    }
 
-    result.push({ wordId: ocrWords[i].id, startMs, endMs })
-    ocrCum += ocrCounts[i]
+    const segStart = sorted[ptIdx]
+    const segEnd = sorted[ptIdx + 1]
+    const segMs = segEnd.ms - segStart.ms
+
+    // Total chars in this segment
+    const segWords = words.slice(segStart.wordIdx, segEnd.wordIdx)
+    const segTotalChars = segWords.reduce((s, w) => s + Math.max(1, cjkChars(w.text).length), 0)
+
+    const startMs = Math.round(segStart.ms + (charCumInSeg / segTotalChars) * segMs)
+    charCumInSeg += charCounts[wi]
+    const endMs = Math.max(startMs + 50,
+      Math.round(segStart.ms + (charCumInSeg / segTotalChars) * segMs))
+
+    result.push({ wordId: words[wi].id, startMs, endMs })
   }
 
   return result
 }
 
-/**
- * POST /api/books/[id]/autosync
- * Transcribes local audio with Whisper, saves transcript to storage/transcripts/,
- * finds where OCR text begins in the audio, then maps word timings using
- * Whisper segment anchors.
- */
 export async function POST(
   _req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -136,7 +197,6 @@ export async function POST(
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { id: bookId } = await params
-
   const book = await prisma.book.findUnique({ where: { id: bookId } })
   if (!book) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
@@ -160,35 +220,32 @@ export async function POST(
   try {
     console.log('[autosync] Decoding audio…')
     const audio = await decodeAudio(audioPath)
+    const audioDurationMs = Math.round((audio.length / 16000) * 1000)
 
     const lang = LANG_MAP[book.language ?? 'zh'] ?? 'chinese'
-    console.log(`[autosync] Transcribing ${(audio.length / 16000).toFixed(1)}s (language: ${lang})…`)
+    console.log(`[autosync] Transcribing ${(audioDurationMs / 1000).toFixed(1)}s (${lang})…`)
     const chunks = await transcribe(audio, lang)
-    console.log(`[autosync] Got ${chunks.length} segments`)
+    console.log(`[autosync] ${chunks.length} segments`)
 
-    // Save transcript to storage/transcripts/{bookId}.json for debugging
+    const anchors = findAnchors(words, chunks, audioDurationMs)
+    console.log(`[autosync] ${anchors.length} anchors found`)
+    anchors.slice(0, 5).forEach(a =>
+      console.log(`  OCR[${a.ocrWordIdx}] "${words[a.ocrWordIdx]?.text}" @ ${(a.startMs/1000).toFixed(1)}s`)
+    )
+
+    const timings = assignTimings(words, anchors, audioDurationMs)
+
+    // Save debug transcript
     const transcriptDir = path.join(process.cwd(), 'storage', 'transcripts')
     mkdirSync(transcriptDir, { recursive: true })
-    const transcriptPath = path.join(transcriptDir, `${bookId}.json`)
-    const firstOcrWords = words.slice(0, 10).map(w => w.text).join('')
-    const startChunkIdx = findAudioStartChunk(chunks, firstOcrWords)
-
-    const debugPayload = {
-      bookId,
-      bookTitle: book.title,
-      language: lang,
-      audioDurationS: audio.length / 16000,
-      segmentCount: chunks.length,
-      firstOcrWords,
-      detectedAudioStartChunk: startChunkIdx,
-      detectedAudioStartTime: chunks[startChunkIdx]?.timestamp[0],
-      chunks,
-    }
-    writeFileSync(transcriptPath, JSON.stringify(debugPayload, null, 2))
-    console.log(`[autosync] Transcript saved to ${transcriptPath}`)
-    console.log(`[autosync] OCR starts at chunk ${startChunkIdx}: "${chunks[startChunkIdx]?.text}" @ ${chunks[startChunkIdx]?.timestamp[0]}s`)
-
-    const timings = alignWordsToChunks(words, chunks, startChunkIdx)
+    writeFileSync(
+      path.join(transcriptDir, `${bookId}.json`),
+      JSON.stringify({ bookId, audioDurationMs, chunks, anchors,
+        anchorSample: anchors.slice(0, 10).map(a => ({
+          ...a, ocrText: words[a.ocrWordIdx]?.text
+        }))
+      }, null, 2)
+    )
 
     await Promise.all(
       timings.map(({ wordId, startMs, endMs }) =>
@@ -203,11 +260,10 @@ export async function POST(
     return NextResponse.json({
       ok: true,
       wordCount: words.length,
-      segmentCount: chunks.length,
-      audioStartChunk: startChunkIdx,
-      audioStartTime: chunks[startChunkIdx]?.timestamp[0],
-      audioStartText: chunks[startChunkIdx]?.text,
-      transcriptSaved: transcriptPath,
+      anchorCount: anchors.length,
+      firstAnchor: anchors[0]
+        ? { ocrWord: words[anchors[0].ocrWordIdx]?.text, ms: anchors[0].startMs }
+        : null,
     })
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
