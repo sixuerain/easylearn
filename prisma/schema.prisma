@@ -20,6 +20,7 @@ model Book {
   audioUrl  String?
   createdAt DateTime @default(now())
   pages     Page[]
+  progress  ReadingProgress[]
 }
 
 model Page {
@@ -32,16 +33,19 @@ model Page {
 }
 
 model Word {
-  id       String      @id @default(cuid())
-  pageId   String
-  text     String
-  x        Float
-  y        Float
-  w        Float
-  h        Float
-  orderIdx Int
-  timing   WordTiming?
-  page     Page        @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  id        String             @id @default(cuid())
+  pageId    String
+  text      String
+  x         Float
+  y         Float
+  w         Float
+  h         Float
+  orderIdx  Int
+  timing    WordTiming?
+  page      Page               @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  bookmarks WordBookmark[]
+  planWords ExercisePlanWord[]
+  results   ExerciseResult[]
 }
 
 model WordTiming {
@@ -50,4 +54,91 @@ model WordTiming {
   startMs Int
   endMs   Int
   word    Word   @relation(fields: [wordId], references: [id], onDelete: Cascade)
+}
+
+// ── Kids & Progress ──────────────────────────────────────────────────────────
+
+model Child {
+  id        String   @id @default(cuid())
+  name      String
+  color     String   @default("#f59e0b")
+  createdAt DateTime @default(now())
+
+  progress  ReadingProgress[]
+  bookmarks WordBookmark[]
+  plans     ExercisePlan[]
+  sessions  ExerciseSession[]
+}
+
+model ReadingProgress {
+  id        String   @id @default(cuid())
+  childId   String
+  bookId    String
+  pageIdx   Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  child Child @relation(fields: [childId], references: [id], onDelete: Cascade)
+  book  Book  @relation(fields: [bookId], references: [id], onDelete: Cascade)
+
+  @@unique([childId, bookId])
+}
+
+model WordBookmark {
+  id        String   @id @default(cuid())
+  childId   String
+  wordId    String
+  createdAt DateTime @default(now())
+
+  child Child @relation(fields: [childId], references: [id], onDelete: Cascade)
+  word  Word  @relation(fields: [wordId], references: [id], onDelete: Cascade)
+
+  @@unique([childId, wordId])
+}
+
+// ── Exercise Plans & Scoring ─────────────────────────────────────────────────
+
+model ExercisePlan {
+  id        String   @id @default(cuid())
+  childId   String
+  name      String
+  createdAt DateTime @default(now())
+
+  child    Child              @relation(fields: [childId], references: [id], onDelete: Cascade)
+  words    ExercisePlanWord[]
+  sessions ExerciseSession[]
+}
+
+model ExercisePlanWord {
+  id       String @id @default(cuid())
+  planId   String
+  wordId   String
+  orderIdx Int    @default(0)
+
+  plan ExercisePlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  word Word         @relation(fields: [wordId], references: [id], onDelete: Cascade)
+
+  @@unique([planId, wordId])
+}
+
+model ExerciseSession {
+  id          String   @id @default(cuid())
+  planId      String
+  childId     String
+  score       Int      @default(0)
+  total       Int      @default(0)
+  completedAt DateTime @default(now())
+
+  plan    ExercisePlan     @relation(fields: [planId], references: [id], onDelete: Cascade)
+  child   Child            @relation(fields: [childId], references: [id], onDelete: Cascade)
+  results ExerciseResult[]
+}
+
+model ExerciseResult {
+  id        String  @id @default(cuid())
+  sessionId String
+  wordId    String
+  correct   Boolean
+
+  session ExerciseSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  word    Word            @relation(fields: [wordId], references: [id], onDelete: Cascade)
 }

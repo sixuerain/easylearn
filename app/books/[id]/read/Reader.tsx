@@ -12,6 +12,9 @@ interface Props {
   title: string
   audioSrc: string | null
   pages: PageData[]
+  childId: string | null
+  initialPageIdx: number
+  initialBookmarks: string[]  // word IDs already bookmarked
 }
 
 function fmt(s: number) {
@@ -20,7 +23,7 @@ function fmt(s: number) {
   return `${m}:${sec.toString().padStart(2, '0')}`
 }
 
-export default function Reader({ bookId, title, audioSrc, pages }: Props) {
+export default function Reader({ bookId, title, audioSrc, pages, childId, initialPageIdx, initialBookmarks }: Props) {
   const allWords = useMemo(
     () => pages.flatMap(p => p.words.map(w => ({ ...w, pageId: p.id, pageNum: p.pageNum }))),
     [pages]
@@ -32,9 +35,12 @@ export default function Reader({ bookId, title, audioSrc, pages }: Props) {
   const [duration, setDuration] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(1)
-  const [pageIdx, setPageIdx] = useState(0)
+  const [pageIdx, setPageIdx] = useState(initialPageIdx)
   const [showControls, setShowControls] = useState(true)
+  const [bookmarks, setBookmarks] = useState<Set<string>>(new Set(initialBookmarks))
+  const [bookmarkAnim, setBookmarkAnim] = useState<string | null>(null) // word id being animated
   const controlTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const progressSaveTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
 
   const currentPage = pages[pageIdx]
 
@@ -50,6 +56,19 @@ export default function Reader({ bookId, title, audioSrc, pages }: Props) {
     const idx = pages.findIndex(p => p.id === activeWord.pageId)
     if (idx !== -1 && idx !== pageIdx) setPageIdx(idx)
   }, [activeWord?.pageId])
+
+  // Save reading progress when page changes
+  useEffect(() => {
+    if (!childId) return
+    clearTimeout(progressSaveTimer.current)
+    progressSaveTimer.current = setTimeout(() => {
+      fetch(`/api/children/${childId}/progress/${bookId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pageIdx }),
+      })
+    }, 800)
+  }, [pageIdx, childId, bookId])
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.playbackRate = speed
@@ -77,6 +96,25 @@ export default function Reader({ bookId, title, audioSrc, pages }: Props) {
     audioRef.current.currentTime = ((e.clientX - rect.left) / rect.width) * duration
   }
 
+  // Bookmark active word
+  async function toggleBookmark() {
+    if (!childId || !activeWord) return
+    const wordId = activeWord.id
+    const isBookmarked = bookmarks.has(wordId)
+    setBookmarks(prev => {
+      const n = new Set(prev)
+      isBookmarked ? n.delete(wordId) : n.add(wordId)
+      return n
+    })
+    setBookmarkAnim(wordId)
+    setTimeout(() => setBookmarkAnim(null), 600)
+    if (isBookmarked) {
+      await fetch(`/api/children/${childId}/bookmarks/${wordId}`, { method: 'DELETE' })
+    } else {
+      await fetch(`/api/children/${childId}/bookmarks/${wordId}`, { method: 'POST' })
+    }
+  }
+
   // Auto-hide controls after 4s of play
   function resetControlTimer() {
     setShowControls(true)
@@ -85,7 +123,7 @@ export default function Reader({ bookId, title, audioSrc, pages }: Props) {
   }
   useEffect(() => { if (playing) resetControlTimer(); else setShowControls(true) }, [playing])
 
-  // Keyboard: space = play/pause, ← / → = ±5s, PageUp/Down = prev/next page
+  // Keyboard: space = play/pause, ← / → = ±5s, PageUp/Down = prev/next page, b = bookmark
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.target instanceof HTMLInputElement) return
@@ -94,10 +132,11 @@ export default function Reader({ bookId, title, audioSrc, pages }: Props) {
       if (e.code === 'ArrowLeft') seekBy(-5)
       if (e.code === 'PageDown') setPageIdx(i => Math.min(pages.length - 1, i + 1))
       if (e.code === 'PageUp') setPageIdx(i => Math.max(0, i - 1))
+      if (e.code === 'KeyB') toggleBookmark()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [togglePlay, pages.length])
+  }, [togglePlay, pages.length, activeWord, childId, bookmarks])
 
   const progress = duration ? (currentMs / (duration * 1000)) * 100 : 0
 
@@ -111,14 +150,16 @@ export default function Reader({ bookId, title, audioSrc, pages }: Props) {
     return 'border-sky-300/20 bg-transparent cursor-pointer'
   }
 
+  const isActiveBookmarked = activeWord ? bookmarks.has(activeWord.id) : false
+
   return (
     <div
       className="min-h-screen bg-black flex flex-col select-none"
       onClick={resetControlTimer}
     >
-      {/* Header — fades out during playback */}
+      {/* Header */}
       <div className={`flex items-center px-4 py-2 bg-gradient-to-b from-black/80 to-transparent absolute top-0 left-0 right-0 z-20 transition-opacity duration-500 ${showControls || !playing ? 'opacity-100' : 'opacity-0'}`}>
-        <Link href={`/books/${bookId}`} className="text-gray-300 text-xl mr-3">←</Link>
+        <Link href={childId ? `/?child=${childId}` : '/'} className="text-gray-300 text-xl mr-3">←</Link>
         <span className="text-gray-200 text-sm font-medium flex-1 truncate">{title}</span>
         <div className="flex items-center gap-1">
           <button onClick={() => setPageIdx(i => Math.max(0, i - 1))} disabled={pageIdx === 0}
@@ -138,8 +179,6 @@ export default function Reader({ bookId, title, audioSrc, pages }: Props) {
             alt={`Page ${currentPage?.pageNum}`}
             className="w-full block rounded-xl shadow-2xl"
           />
-
-          {/* Word overlay boxes */}
           {currentPage?.words.map(word => (
             <div
               key={word.id}
@@ -156,11 +195,18 @@ export default function Reader({ bookId, title, audioSrc, pages }: Props) {
         </div>
       </div>
 
-      {/* Current word display */}
+      {/* Active word display + bookmark */}
       <div className="absolute bottom-[10.5rem] left-0 right-0 flex justify-center px-4 pointer-events-none">
         {activeWord && (
-          <div className="bg-black/70 backdrop-blur px-6 py-2 rounded-full">
+          <div className="flex items-center gap-2 bg-black/70 backdrop-blur px-4 py-2 rounded-full pointer-events-auto">
             <span className="text-yellow-300 text-2xl font-bold tracking-wide">{activeWord.text}</span>
+            {childId && (
+              <button
+                onClick={toggleBookmark}
+                className={`text-2xl transition-transform ${bookmarkAnim === activeWord.id ? 'scale-150' : 'scale-100'}`}>
+                {isActiveBookmarked ? '⭐' : '☆'}
+              </button>
+            )}
           </div>
         )}
         {!hasTimings && (
@@ -177,7 +223,6 @@ export default function Reader({ bookId, title, audioSrc, pages }: Props) {
           <div className="relative h-1.5 bg-gray-700 rounded-full cursor-pointer" onClick={seekToProgress}>
             <div className="absolute left-0 top-0 h-full bg-amber-500 rounded-full transition-[width]"
               style={{ width: `${progress}%` }} />
-            {/* Word markers */}
             {hasTimings && allWords.filter(w => w.timing).map(w => (
               <div key={w.id}
                 className={`absolute top-1/2 -translate-y-1/2 w-1 h-1 rounded-full ${
@@ -218,15 +263,21 @@ export default function Reader({ bookId, title, audioSrc, pages }: Props) {
             <button onClick={() => seekBy(10)} className="text-gray-300 text-2xl">⟫</button>
           </div>
 
-          {/* Sync link */}
-          <Link href={`/books/${bookId}/sync`}
-            className="text-gray-500 hover:text-gray-300 text-xs text-center leading-tight">
-            🎵<br />Sync
-          </Link>
+          {/* Child dashboard or Sync link */}
+          {childId ? (
+            <Link href={`/children/${childId}`}
+              className="text-gray-500 hover:text-gray-300 text-xs text-center leading-tight">
+              👧<br />Me
+            </Link>
+          ) : (
+            <Link href={`/books/${bookId}/sync`}
+              className="text-gray-500 hover:text-gray-300 text-xs text-center leading-tight">
+              🎵<br />Sync
+            </Link>
+          )}
         </div>
       </div>
 
-      {/* Hidden audio element */}
       {audioSrc && (
         <audio ref={audioRef} src={audioSrc}
           onTimeUpdate={() => setCurrentMs((audioRef.current?.currentTime ?? 0) * 1000)}
