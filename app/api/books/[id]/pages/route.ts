@@ -7,6 +7,72 @@ import path from 'path'
 import sharp from 'sharp'
 import jsQR from 'jsqr'
 
+/** Expand a single-channel greyscale buffer to RGBA for jsQR */
+function greyToRGBA(buf: Buffer, w: number, h: number): Uint8ClampedArray {
+  const rgba = new Uint8ClampedArray(w * h * 4)
+  for (let i = 0; i < w * h; i++) {
+    rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = buf[i]
+    rgba[i * 4 + 3] = 255
+  }
+  return rgba
+}
+
+/**
+ * Multi-strategy QR detection:
+ *  1. Standard RGBA scan at multiple resolutions
+ *  2. Green-channel scan (catches red/coloured QR codes)
+ *  3. Quadrant scans with green channel (catches small QR codes)
+ */
+async function detectQR(buffer: Buffer): Promise<string | null> {
+  // Strategy 1: standard full-image RGBA
+  for (const size of [800, 1200, 1600]) {
+    const { data, info } = await sharp(buffer)
+      .resize(size, size, { fit: 'inside' })
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true })
+    const code = jsQR(new Uint8ClampedArray(data), info.width, info.height)
+    if (code?.data) return code.data
+  }
+
+  // Strategy 2: green channel (red/coloured QR codes have high contrast in green)
+  for (const size of [1200, 1600]) {
+    const { data, info } = await sharp(buffer)
+      .resize(size, size, { fit: 'inside' })
+      .extractChannel('green')
+      .normalise()
+      .raw()
+      .toBuffer({ resolveWithObject: true })
+    const code = jsQR(greyToRGBA(data, info.width, info.height), info.width, info.height)
+    if (code?.data) return code.data
+  }
+
+  // Strategy 3: scan four quadrants with green channel (finds small QR codes)
+  const meta = await sharp(buffer).metadata()
+  const W = meta.width ?? 1080
+  const H = meta.height ?? 1920
+  const half = { w: Math.floor(W / 2), h: Math.floor(H / 2) }
+  const quadrants = [
+    { left: 0,       top: 0,       width: half.w, height: half.h },
+    { left: half.w,  top: 0,       width: half.w, height: half.h },
+    { left: 0,       top: half.h,  width: half.w, height: half.h },
+    { left: half.w,  top: half.h,  width: half.w, height: half.h },
+  ]
+  for (const quad of quadrants) {
+    const { data, info } = await sharp(buffer)
+      .extract(quad)
+      .resize(800, 800, { fit: 'inside' })
+      .extractChannel('green')
+      .normalise()
+      .raw()
+      .toBuffer({ resolveWithObject: true })
+    const code = jsQR(greyToRGBA(data, info.width, info.height), info.width, info.height)
+    if (code?.data) return code.data
+  }
+
+  return null
+}
+
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -41,15 +107,9 @@ export async function POST(
   // QR code detection (only if no audio URL yet)
   if (!book.audioUrl) {
     try {
-      const { data, info } = await sharp(buffer)
-        .resize(1200, 1200, { fit: 'inside' })
-        .ensureAlpha()
-        .raw()
-        .toBuffer({ resolveWithObject: true })
-
-      const code = jsQR(new Uint8ClampedArray(data), info.width, info.height)
-      if (code?.data) {
-        await prisma.book.update({ where: { id: bookId }, data: { audioUrl: code.data } })
+      const url = await detectQR(buffer)
+      if (url) {
+        await prisma.book.update({ where: { id: bookId }, data: { audioUrl: url } })
       }
     } catch {
       // QR detection optional — ignore errors
