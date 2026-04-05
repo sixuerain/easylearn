@@ -33,12 +33,18 @@ export default async function BookPage({ params }: { params: Promise<{ id: strin
             <p className="text-xs text-gray-400 uppercase tracking-wide">{book.language} · {book.pages.length} pages</p>
           </div>
           {book.pages.length > 0 && (
-            <Link
-              href={`/books/${id}/read`}
-              className="bg-amber-500 hover:bg-amber-600 text-white font-semibold px-4 py-2 rounded-xl text-sm whitespace-nowrap transition-colors"
-            >
-              ▶ Read
-            </Link>
+            <div className="flex gap-2">
+              {book.audioUrl && (
+                <Link href={`/books/${id}/sync`}
+                  className="bg-blue-500 hover:bg-blue-600 text-white font-semibold px-3 py-2 rounded-xl text-sm whitespace-nowrap transition-colors">
+                  🎵 Sync
+                </Link>
+              )}
+              <Link href={`/books/${id}/read`}
+                className="bg-amber-500 hover:bg-amber-600 text-white font-semibold px-3 py-2 rounded-xl text-sm whitespace-nowrap transition-colors">
+                ▶ Read
+              </Link>
+            </div>
           )}
         </div>
 
