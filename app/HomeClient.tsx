@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
-import Image from 'next/image'
 
 interface Book {
   id: string; title: string; language: string; audioUrl: string | null
@@ -87,8 +86,8 @@ export default function HomeClient({ books, children }: { books: Book[]; childre
               <Link href={`/books/${book.id}`} className="block">
                 <div className="relative aspect-[3/4] bg-amber-100">
                   {book.coverPath ? (
-                    <Image src={book.coverPath} alt={book.title} fill className="object-cover"
-                      sizes="(max-width: 640px) 50vw, 300px" />
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={book.coverPath} alt={book.title} className="absolute inset-0 w-full h-full object-cover" />
                   ) : (
                     <div className="absolute inset-0 flex items-center justify-center text-5xl">📖</div>
                   )}

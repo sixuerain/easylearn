@@ -3,7 +3,6 @@ import { authOptions } from '@/lib/auth'
 import { redirect } from 'next/navigation'
 import { prisma } from '@/lib/prisma'
 import Link from 'next/link'
-import Image from 'next/image'
 import HomeClient from './HomeClient'
 
 export default async function Home() {

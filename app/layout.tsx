@@ -9,7 +9,6 @@ const geist = Geist({ subsets: ['latin'] })
 export const metadata: Metadata = {
   title: 'EasyLearn',
   description: 'Read along with your kids',
-  manifest: '/manifest.json',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',

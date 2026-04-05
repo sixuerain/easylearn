@@ -4,6 +4,7 @@ import { redirect, notFound } from 'next/navigation'
 import { prisma } from '@/lib/prisma'
 import Link from 'next/link'
 import PageManager from './PageManager'
+import DeleteBookButton from './DeleteBookButton'
 
 export default async function BookPage({ params }: { params: Promise<{ id: string }> }) {
   const session = await getServerSession(authOptions)
@@ -32,6 +33,7 @@ export default async function BookPage({ params }: { params: Promise<{ id: strin
             <h1 className="text-2xl font-bold text-gray-800 truncate">{book.title}</h1>
             <p className="text-xs text-gray-400 uppercase tracking-wide">{book.language} · {book.pages.length} pages</p>
           </div>
+          <DeleteBookButton bookId={id} />
           {book.pages.length > 0 && (
             <div className="flex gap-2">
               {book.audioUrl && (

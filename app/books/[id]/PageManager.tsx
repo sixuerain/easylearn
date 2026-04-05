@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, useRef } from 'react'
-import Image from 'next/image'
 import Link from 'next/link'
 
 interface Page {
@@ -113,8 +112,9 @@ export default function PageManager({ bookId, initialPages, audioUrl: initialAud
           {pages.map((page, idx) => (
             <div key={page.id} className="bg-white rounded-xl shadow overflow-hidden">
               <div className="relative aspect-[3/4] bg-gray-100">
-                <Image src={page.imagePath} alt={`Page ${page.pageNum}`} fill
-                  className="object-cover" sizes="(max-width: 640px) 50vw, 300px" />
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={page.imagePath} alt={`Page ${page.pageNum}`}
+                  className="absolute inset-0 w-full h-full object-cover" />
                 {/* Page number badge */}
                 <div className="absolute top-1.5 left-1.5 bg-black/50 text-white text-xs font-bold px-2 py-0.5 rounded-full">
                   {page.pageNum}
