@@ -4,35 +4,110 @@ import { authOptions } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import { getLocalAudioPath } from '@/lib/audio'
 import path from 'path'
+import { readFileSync } from 'fs'
 
-/** Parse audio duration from local file using music-metadata */
-async function getAudioDurationMs(bookId: string): Promise<number | null> {
-  const served = getLocalAudioPath(bookId)
-  if (!served) return null
-  // served = /api/audio/{bookId}.ext — resolve to storage/audio/{bookId}.ext
-  const filename = served.replace(/^\/api\/audio\//, '')
-  const filePath = path.join(process.cwd(), 'storage', 'audio', filename)
-  try {
-    const { parseFile } = await import('music-metadata')
-    const meta = await parseFile(filePath)
-    const secs = meta.format.duration
-    return secs ? Math.round(secs * 1000) : null
-  } catch {
-    return null
+const LANG_MAP: Record<string, string> = {
+  zh: 'chinese', ja: 'japanese', ko: 'korean',
+  en: 'english', es: 'spanish', fr: 'french',
+}
+
+/** Decode MP3 to mono Float32Array at 16kHz using node-web-audio-api */
+async function decodeAudio(filePath: string): Promise<Float32Array> {
+  const { AudioContext } = await import('node-web-audio-api')
+  const ctx = new AudioContext({ sampleRate: 16000 })
+  const buf = readFileSync(filePath)
+  const decoded = await ctx.decodeAudioData(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength))
+  const audio = decoded.getChannelData(0)
+  await ctx.close()
+  return audio
+}
+
+interface Chunk { text: string; timestamp: [number, number] }
+
+/** Run Whisper on the audio, return segments with [startS, endS] timestamps */
+async function transcribe(audio: Float32Array, language: string): Promise<Chunk[]> {
+  const { pipeline } = await import('@xenova/transformers')
+  const asr = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base', {
+    cache_dir: path.join(process.cwd(), '.whisper_cache'),
+  })
+  const result = await asr(audio, {
+    language,
+    task: 'transcribe',
+    return_timestamps: true,
+    chunk_length_s: 30,
+    stride_length_s: 5,
+  }) as { chunks: Chunk[] }
+  return result.chunks ?? []
+}
+
+/** Keep only CJK + basic latin characters for alignment counting */
+const chineseChars = (s: string) =>
+  [...s].filter(c => /[\u4e00-\u9fff\u3400-\u4dbf\u{20000}-\u{2a6df}]/u.test(c))
+
+/**
+ * Align OCR words to Whisper segment timestamps.
+ *
+ * Strategy:
+ *   1. Count Chinese characters in Whisper chunks → cumulative Whisper position
+ *   2. Count Chinese characters in OCR words → cumulative OCR position
+ *   3. Map each OCR char position proportionally to the Whisper char timeline
+ *   4. Interpolate within the Whisper segment to get ms timestamp
+ *
+ * This is robust to traditional/simplified differences and minor misrecognitions
+ * because it matches by character COUNT proportion, not character identity.
+ */
+function alignWordsToChunks(
+  ocrWords: { id: string; text: string }[],
+  chunks: Chunk[],
+): { wordId: string; startMs: number; endMs: number }[] {
+  const ocrCounts  = ocrWords.map(w => Math.max(1, chineseChars(w.text).length))
+  const chunkCounts = chunks.map(c => Math.max(1, chineseChars(c.text).length))
+
+  const totalOcr     = ocrCounts.reduce((a, b) => a + b, 0)
+  const totalWhisper = chunkCounts.reduce((a, b) => a + b, 0)
+
+  /** Given a cumulative Whisper-char position, return the ms timestamp */
+  function whisperPosToMs(pos: number): number {
+    let cum = 0
+    for (let i = 0; i < chunks.length; i++) {
+      const next = cum + chunkCounts[i]
+      const c = chunks[i]
+      if (pos <= next || i === chunks.length - 1) {
+        const frac = chunkCounts[i] > 0 ? Math.min(1, (pos - cum) / chunkCounts[i]) : 0
+        return Math.round((c.timestamp[0] + frac * (c.timestamp[1] - c.timestamp[0])) * 1000)
+      }
+      cum = next
+    }
+    return Math.round(chunks[chunks.length - 1].timestamp[1] * 1000)
   }
+
+  const result: { wordId: string; startMs: number; endMs: number }[] = []
+  let ocrCum = 0
+
+  for (let i = 0; i < ocrWords.length; i++) {
+    const wordStartOcr = ocrCum
+    const wordEndOcr   = ocrCum + ocrCounts[i]
+
+    const wStart = (wordStartOcr / totalOcr) * totalWhisper
+    const wEnd   = (wordEndOcr   / totalOcr) * totalWhisper
+
+    const startMs = whisperPosToMs(wStart)
+    const endMs   = Math.max(startMs + 50, whisperPosToMs(wEnd))
+
+    result.push({ wordId: ocrWords[i].id, startMs, endMs })
+    ocrCum = wordEndOcr
+  }
+
+  return result
 }
 
 /**
  * POST /api/books/[id]/autosync
- *
- * Automatically assigns word timings proportional to character count.
- * Each Chinese character takes roughly equal spoken time, so this gives
- * a reasonable first approximation without manual stamping.
- *
- * Optional body: { startMs?: number, endMs?: number } to constrain the range.
+ * Transcribes the local audio with Whisper, then maps OCR word timings using
+ * segment-level anchors. Much more accurate than uniform proportional distribution.
  */
 export async function POST(
-  req: Request,
+  _req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const session = await getServerSession(authOptions)
@@ -40,55 +115,51 @@ export async function POST(
 
   const { id: bookId } = await params
 
-  // Get total audio duration
-  const totalMs = await getAudioDurationMs(bookId)
-  if (!totalMs) {
-    return NextResponse.json({ error: 'No local audio cached. Download audio first via the Sync page.' }, { status: 400 })
-  }
+  const book = await prisma.book.findUnique({ where: { id: bookId } })
+  if (!book) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
-  // Load all pages + words in order
+  const served = getLocalAudioPath(bookId)
+  if (!served) {
+    return NextResponse.json({ error: 'No local audio cached. Download audio first.' }, { status: 400 })
+  }
+  const audioFilename = served.replace(/^\/api\/audio\//, '')
+  const audioPath = path.join(process.cwd(), 'storage', 'audio', audioFilename)
+
   const pages = await prisma.page.findMany({
     where: { bookId },
     orderBy: { pageNum: 'asc' },
     include: { words: { orderBy: { orderIdx: 'asc' } } },
   })
-
   const words = pages.flatMap(p => p.words)
   if (words.length === 0) {
     return NextResponse.json({ error: 'No words found. Run OCR on pages first.' }, { status: 400 })
   }
 
-  // Optional custom range from request body
-  const body = await req.json().catch(() => ({}))
-  const rangeStart = typeof body.startMs === 'number' ? body.startMs : 0
-  const rangeEnd   = typeof body.endMs   === 'number' ? body.endMs   : totalMs
-  const rangeMs    = rangeEnd - rangeStart
+  try {
+    console.log('[autosync] Decoding audio…')
+    const audio = await decodeAudio(audioPath)
 
-  // Weight each word by character count (Chinese chars ≈ equal duration)
-  const charCounts = words.map(w => Math.max(1, [...w.text].length))
-  const totalChars = charCounts.reduce((a, b) => a + b, 0)
+    const lang = LANG_MAP[book.language ?? 'zh'] ?? 'chinese'
+    console.log(`[autosync] Transcribing ${(audio.length / 16000).toFixed(1)}s of audio (language: ${lang})…`)
+    const chunks = await transcribe(audio, lang)
+    console.log(`[autosync] Got ${chunks.length} segments`)
 
-  // Build timings: each word gets a proportional slice of the audio
-  let cursor = rangeStart
-  const timings: { id: string; startMs: number; endMs: number }[] = []
-  for (let i = 0; i < words.length; i++) {
-    const slice = Math.round((charCounts[i] / totalChars) * rangeMs)
-    const startMs = cursor
-    const endMs = i === words.length - 1 ? rangeEnd : cursor + slice
-    timings.push({ id: words[i].id, startMs, endMs })
-    cursor = endMs
-  }
+    const timings = alignWordsToChunks(words, chunks)
 
-  // Upsert timings into the database
-  await Promise.all(
-    timings.map(({ id, startMs, endMs }) =>
-      prisma.wordTiming.upsert({
-        where: { wordId: id },
-        create: { wordId: id, startMs, endMs },
-        update: { startMs, endMs },
-      })
+    await Promise.all(
+      timings.map(({ wordId, startMs, endMs }) =>
+        prisma.wordTiming.upsert({
+          where: { wordId },
+          create: { wordId, startMs, endMs },
+          update: { startMs, endMs },
+        })
+      )
     )
-  )
 
-  return NextResponse.json({ ok: true, wordCount: words.length, totalMs })
+    return NextResponse.json({ ok: true, wordCount: words.length, segmentCount: chunks.length })
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[autosync] Error:', msg)
+    return NextResponse.json({ error: msg }, { status: 500 })
+  }
 }

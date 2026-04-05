@@ -47,6 +47,9 @@ dev.db-journal
 # tesseract language data cache
 .tesseract/
 
+# whisper model cache
+.whisper_cache/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
