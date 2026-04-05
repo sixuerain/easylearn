@@ -20,8 +20,17 @@ const LANG_MAP: Record<string, string> = {
   fr: 'fra',
 }
 
+/**
+ * imagePath is stored in DB as /api/img/books/{bookId}/{filename}.
+ * Strip the /api/img/books/ prefix and resolve under storage/books/.
+ */
+function resolveStoragePath(imagePath: string): string {
+  const suffix = imagePath.replace(/^\/api\/img\/books\//, '')
+  return path.join(process.cwd(), 'storage', 'books', suffix)
+}
+
 export async function runOcr(imagePath: string, language = 'en'): Promise<OcrWord[]> {
-  const fullPath = path.join(process.cwd(), 'public', imagePath)
+  const fullPath = resolveStoragePath(imagePath)
   const { width = 1, height = 1 } = await sharp(fullPath).metadata()
 
   const lang = LANG_MAP[language] ?? 'eng'
