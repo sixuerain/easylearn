@@ -7,7 +7,7 @@ const AUDIO_EXTS = ['mp3', 'aac', 'm4a', 'ogg', 'wav']
 export function getLocalAudioPath(bookId: string): string | null {
   for (const ext of AUDIO_EXTS) {
     const file = path.join(process.cwd(), 'public', 'uploads', 'audio', `${bookId}.${ext}`)
-    if (existsSync(file)) return `/uploads/audio/${bookId}.${ext}`
+    if (existsSync(file)) return `/api/audio/${bookId}.${ext}`
   }
   return null
 }

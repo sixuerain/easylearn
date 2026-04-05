@@ -1,4 +1,4 @@
-const CACHE = 'easylearn-v2'
+const CACHE = 'easylearn-v3'
 
 // Assets to pre-cache on install (the bare minimum app shell)
 const PRECACHE = ['/', '/login']
@@ -25,7 +25,7 @@ self.addEventListener('fetch', e => {
   if (url.pathname.startsWith('/api/')) return
 
   // Cache-first for uploaded images and audio (large static assets)
-  if (url.pathname.startsWith('/api/img/') || url.pathname.startsWith('/uploads/')) {
+  if (url.pathname.startsWith('/api/img/') || url.pathname.startsWith('/api/audio/') || url.pathname.startsWith('/uploads/')) {
     e.respondWith(
       caches.match(request).then(cached => {
         if (cached) return cached
