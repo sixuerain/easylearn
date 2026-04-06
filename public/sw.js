@@ -1,14 +1,7 @@
-const CACHE = 'easylearn-v3'
+const CACHE = 'easylearn-v5'
 
-// Assets to pre-cache on install (the bare minimum app shell)
-const PRECACHE = ['/', '/login']
-
-self.addEventListener('install', e => {
-  e.waitUntil(
-    caches.open(CACHE).then(c => c.addAll(PRECACHE)).then(() => self.skipWaiting())
-  )
-})
-
+// Only cache static assets and media — never intercept page navigations
+self.addEventListener('install', () => self.skipWaiting())
 self.addEventListener('activate', e => {
   e.waitUntil(
     caches.keys().then(keys =>
@@ -18,60 +11,26 @@ self.addEventListener('activate', e => {
 })
 
 self.addEventListener('fetch', e => {
-  const { request } = e
-  const url = new URL(request.url)
+  const url = new URL(e.request.url)
 
-  // Never cache API calls or NextAuth
-  if (url.pathname.startsWith('/api/')) return
-
-  // Cache-first for uploaded images and audio (large static assets)
-  if (url.pathname.startsWith('/api/img/') || url.pathname.startsWith('/api/audio/') || url.pathname.startsWith('/uploads/')) {
-    e.respondWith(
-      caches.match(request).then(cached => {
-        if (cached) return cached
-        return fetch(request).then(res => {
-          if (res.ok) {
-            const clone = res.clone()
-            caches.open(CACHE).then(c => c.put(request, clone))
-          }
-          return res
-        })
-      })
-    )
-    return
-  }
-
-  // Cache-first for static assets (JS, CSS, icons, fonts)
-  if (
+  // Only cache-first for immutable static assets and uploaded media
+  const shouldCache =
     url.pathname.startsWith('/_next/static/') ||
-    url.pathname.startsWith('/icons/') ||
-    url.pathname === '/manifest.json'
-  ) {
-    e.respondWith(
-      caches.match(request).then(cached => {
-        if (cached) return cached
-        return fetch(request).then(res => {
-          if (res.ok) {
-            const clone = res.clone()
-            caches.open(CACHE).then(c => c.put(request, clone))
-          }
-          return res
-        })
-      })
-    )
-    return
-  }
+    url.pathname.startsWith('/api/img/') ||
+    url.pathname.startsWith('/api/audio/')
 
-  // Network-first for HTML pages — fall back to cache when offline
+  if (!shouldCache) return // let browser handle everything else normally
+
   e.respondWith(
-    fetch(request)
-      .then(res => {
-        if (res.ok && request.method === 'GET') {
+    caches.match(e.request).then(cached => {
+      if (cached) return cached
+      return fetch(e.request).then(res => {
+        if (res.ok) {
           const clone = res.clone()
-          caches.open(CACHE).then(c => c.put(request, clone))
+          caches.open(CACHE).then(c => c.put(e.request, clone))
         }
         return res
       })
-      .catch(() => caches.match(request))
+    })
   )
 })

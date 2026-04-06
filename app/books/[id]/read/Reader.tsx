@@ -72,7 +72,7 @@ function useWebAudio(src: string | null) {
       const resp = await fetch(src!)
       const arrayBuf = await resp.arrayBuffer()
       const decoded = await ctx.decodeAudioData(arrayBuf)
-      if (cancelled) { ctx.close(); return }
+      if (cancelled) { ctx.close().catch(() => {}); return }
       bufferRef.current = decoded
       setDuration(decoded.duration)
       setReady(true)
@@ -81,8 +81,8 @@ function useWebAudio(src: string | null) {
     return () => {
       cancelled = true
       cancelAnimationFrame(rafRef.current)
-      sourceRef.current?.stop()
-      ctxRef.current?.close()
+      try { sourceRef.current?.stop() } catch {}
+      ctxRef.current?.close().catch(() => {})
     }
   }, [src])
 

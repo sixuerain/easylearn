@@ -60,11 +60,15 @@ async function transcribe(audio: Float32Array, language: string): Promise<{ chun
       return_timestamps: 'word',
     }) as { chunks: Chunk[] }
     const chunks = result.chunks ?? []
-    if (chunks.length > 0 && chunks.some(c => c.timestamp[0] != null && c.timestamp[1] != null && c.timestamp[0] !== c.timestamp[1])) {
-      console.log(`[autosync] Word-level timestamps: ${chunks.length} entries`)
+    const audioDurationSec = audio.length / 16000
+    const validChunks = chunks.filter(c => c.timestamp[0] != null && c.timestamp[1] != null && c.timestamp[0] !== c.timestamp[1])
+    const lastEnd = Math.max(...validChunks.map(c => c.timestamp[1] ?? 0))
+    const coverage = audioDurationSec > 0 ? lastEnd / audioDurationSec : 0
+    if (validChunks.length >= 20 && coverage > 0.5) {
+      console.log(`[autosync] Word-level timestamps: ${chunks.length} entries, coverage ${(coverage * 100).toFixed(0)}% (${lastEnd.toFixed(1)}s / ${audioDurationSec.toFixed(1)}s)`)
       return { chunks, wordLevel: true }
     }
-    console.log('[autosync] Word-level timestamps returned no usable data, falling back to chunk-level')
+    console.log(`[autosync] Word-level timestamps insufficient: ${validChunks.length} entries, coverage ${(coverage * 100).toFixed(0)}% — falling back to chunk-level`)
   } catch (err) {
     console.log('[autosync] Word-level timestamps failed, falling back to chunk-level:', err)
   }
