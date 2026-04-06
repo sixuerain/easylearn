@@ -90,8 +90,12 @@ async function transcribe(audio: Float32Array, language: string): Promise<{ chun
  * Deduplicate overlapping Whisper chunks from chunked processing.
  */
 function deduplicateChunks(chunks: Chunk[]): Chunk[] {
+  if (chunks.length === 0) return chunks
+
+  // Separate valid and null-timestamp chunks
+  const nullChunks = chunks.filter(c => c.timestamp[0] == null || c.timestamp[1] == null)
   const valid = chunks.filter(c => c.timestamp[0] != null && c.timestamp[1] != null)
-  if (valid.length === 0) return valid
+  if (valid.length === 0) return nullChunks // pass through null chunks for extrapolation
 
   const result: Chunk[] = [valid[0]]
   for (let i = 1; i < valid.length; i++) {
@@ -130,7 +134,9 @@ function deduplicateChunks(chunks: Chunk[]): Chunk[] {
       result.push(curr)
     }
   }
-  console.log(`[autosync] Chunk dedup: ${valid.length} → ${result.length} chunks`)
+  // Append null-timestamp chunks at the end for extrapolation
+  result.push(...nullChunks)
+  console.log(`[autosync] Chunk dedup: ${valid.length} valid → ${result.length} chunks (${nullChunks.length} null-timestamp)`)
   return result
 }
 
