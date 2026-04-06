@@ -18,7 +18,7 @@ export default async function ReadPage({
   const { id } = await params
   const { child: childId } = await searchParams
 
-  const [book, childData] = await Promise.all([
+  const [book, transcriptWords, childData] = await Promise.all([
     prisma.book.findUnique({
       where: { id },
       include: {
@@ -31,6 +31,13 @@ export default async function ReadPage({
             },
           },
         },
+      },
+    }),
+    prisma.transcriptWord.findMany({
+      where: { bookId: id },
+      orderBy: { orderIdx: 'asc' },
+      include: {
+        ocrWord: { select: { id: true, x: true, y: true, w: true, h: true, pageId: true } },
       },
     }),
     childId ? Promise.all([
@@ -55,6 +62,14 @@ export default async function ReadPage({
       childId={childId ?? null}
       initialPageIdx={initialPageIdx}
       initialBookmarks={initialBookmarks}
+      transcriptWords={transcriptWords.map(tw => ({
+        id: tw.id,
+        text: tw.text,
+        startMs: tw.startMs,
+        endMs: tw.endMs,
+        pageId: tw.pageId,
+        ocrWord: tw.ocrWord,
+      }))}
     />
   )
 }

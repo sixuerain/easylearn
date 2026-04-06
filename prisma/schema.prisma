@@ -14,22 +14,24 @@ model User {
 }
 
 model Book {
-  id        String   @id @default(cuid())
-  title     String
-  language  String   @default("en")
-  audioUrl  String?
-  createdAt DateTime @default(now())
-  pages     Page[]
-  progress  ReadingProgress[]
+  id              String            @id @default(cuid())
+  title           String
+  language        String            @default("en")
+  audioUrl        String?
+  createdAt       DateTime          @default(now())
+  pages           Page[]
+  progress        ReadingProgress[]
+  transcriptWords TranscriptWord[]
 }
 
 model Page {
-  id        String @id @default(cuid())
-  bookId    String
-  pageNum   Int
-  imagePath String
-  words     Word[]
-  book      Book   @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  id              String            @id @default(cuid())
+  bookId          String
+  pageNum         Int
+  imagePath       String
+  words           Word[]
+  book            Book              @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  transcriptWords TranscriptWord[]
 }
 
 model Word {
@@ -41,11 +43,12 @@ model Word {
   w         Float
   h         Float
   orderIdx  Int
-  timing    WordTiming?
-  page      Page               @relation(fields: [pageId], references: [id], onDelete: Cascade)
-  bookmarks WordBookmark[]
-  planWords ExercisePlanWord[]
-  results   ExerciseResult[]
+  timing          WordTiming?
+  page            Page               @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  bookmarks       WordBookmark[]
+  planWords       ExercisePlanWord[]
+  results         ExerciseResult[]
+  transcriptMatch TranscriptWord[]
 }
 
 model WordTiming {
@@ -141,6 +144,25 @@ model ExerciseResult {
 
   session ExerciseSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   word    Word            @relation(fields: [wordId], references: [id], onDelete: Cascade)
+}
+
+// ── Transcript (Whisper-produced words with timestamps) ──────────────────────
+
+model TranscriptWord {
+  id        String  @id @default(cuid())
+  bookId    String
+  pageId    String?             // assigned page (from alignment), null if unassigned
+  text      String              // the character/word Whisper heard
+  startMs   Int
+  endMs     Int
+  orderIdx  Int                 // global reading order across the book
+
+  ocrWordId String?             // nullable link to OCR word
+  matchConf Float?              // confidence of OCR match (0–1)
+
+  book      Book    @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  page      Page?   @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  ocrWord   Word?   @relation(fields: [ocrWordId], references: [id], onDelete: SetNull)
 }
 
 // ── Settings (key-value store for API keys and provider selection) ────────────
