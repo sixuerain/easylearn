@@ -43,10 +43,33 @@ function jaccardSim(a: Set<string>, b: Set<string>): number {
   return inter / (a.size + b.size - inter)
 }
 
-async function transcribe(audio: Float32Array, language: string): Promise<Chunk[]> {
+/**
+ * Try word-level timestamps first (gives per-character for CJK).
+ * Fall back to chunk-level if word-level fails or returns no data.
+ */
+async function transcribe(audio: Float32Array, language: string): Promise<{ chunks: Chunk[]; wordLevel: boolean }> {
   const { pipeline, env } = await import('@xenova/transformers')
   env.cacheDir = path.join(process.cwd(), '.whisper_cache')
   const asr = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base')
+
+  // Try word-level timestamps (per-character for CJK)
+  try {
+    const result = await asr(audio, {
+      language,
+      task: 'transcribe',
+      return_timestamps: 'word',
+    }) as { chunks: Chunk[] }
+    const chunks = result.chunks ?? []
+    if (chunks.length > 0 && chunks.some(c => c.timestamp[0] != null && c.timestamp[1] != null && c.timestamp[0] !== c.timestamp[1])) {
+      console.log(`[autosync] Word-level timestamps: ${chunks.length} entries`)
+      return { chunks, wordLevel: true }
+    }
+    console.log('[autosync] Word-level timestamps returned no usable data, falling back to chunk-level')
+  } catch (err) {
+    console.log('[autosync] Word-level timestamps failed, falling back to chunk-level:', err)
+  }
+
+  // Fallback: chunk-level timestamps with chunked processing
   const result = await asr(audio, {
     language,
     task: 'transcribe',
@@ -54,7 +77,7 @@ async function transcribe(audio: Float32Array, language: string): Promise<Chunk[
     chunk_length_s: 10,
     stride_length_s: 2,
   }) as { chunks: Chunk[] }
-  return result.chunks ?? []
+  return { chunks: result.chunks ?? [], wordLevel: false }
 }
 
 // ── Stage 1: Whisper → per-character timeline ────────────────────────────────
@@ -108,14 +131,77 @@ function deduplicateChunks(chunks: Chunk[]): Chunk[] {
 }
 
 /**
- * Stage 1: Build per-CJK-character timeline from Whisper chunks.
- * Each character gets its own startMs/endMs.
+ * Stage 1: Build per-CJK-character timeline from Whisper output.
+ *
+ * Word-level mode: each chunk is already a single word/character with its own timestamp.
+ * Chunk-level mode: each chunk is a phrase; timestamps are interpolated across characters.
  */
-function buildTranscriptChars(chunks: Chunk[]): TranscriptChar[] {
+function buildTranscriptChars(chunks: Chunk[], wordLevel: boolean): TranscriptChar[] {
+  if (wordLevel) {
+    // Word-level: each chunk is one word/character with real timestamps
+    const result: TranscriptChar[] = []
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const c = chunks[ci]
+      // Extrapolate null timestamps from previous chunk's end
+      if (c.timestamp[0] == null || c.timestamp[1] == null) {
+        if (result.length === 0) continue
+        const lastEnd = result[result.length - 1].endMs
+        const chars = cjkChars(c.text)
+        if (chars.length === 0) continue
+        const msPerChar = 350 // ~350ms per CJK char as fallback pace
+        for (let i = 0; i < chars.length; i++) {
+          result.push({
+            char: chars[i],
+            startMs: lastEnd + i * msPerChar,
+            endMs: lastEnd + (i + 1) * msPerChar,
+          })
+        }
+        console.log(`[autosync] Extrapolated ${chars.length} chars from null-timestamp chunk [${ci}]`)
+        continue
+      }
+      const startMs = Math.round(c.timestamp[0] * 1000)
+      const endMs = Math.round(c.timestamp[1] * 1000)
+      if (endMs <= startMs) continue
+      const chars = cjkChars(c.text)
+      if (chars.length === 0) continue
+      if (chars.length === 1) {
+        result.push({ char: chars[0], startMs, endMs })
+      } else {
+        // Multi-char word: distribute timing within this word
+        const msPerChar = (endMs - startMs) / chars.length
+        for (let i = 0; i < chars.length; i++) {
+          result.push({
+            char: chars[i],
+            startMs: Math.round(startMs + i * msPerChar),
+            endMs: Math.round(startMs + (i + 1) * msPerChar),
+          })
+        }
+      }
+    }
+    return result
+  }
+
+  // Chunk-level: deduplicate then interpolate
   const deduped = deduplicateChunks(chunks)
   const result: TranscriptChar[] = []
   for (const c of deduped) {
-    if (c.timestamp[0] == null || c.timestamp[1] == null) continue
+    if (c.timestamp[0] == null || c.timestamp[1] == null) {
+      // Extrapolate from previous chunk's end
+      if (result.length === 0) continue
+      const lastEnd = result[result.length - 1].endMs
+      const chars = cjkChars(c.text)
+      if (chars.length === 0) continue
+      const msPerChar = 350
+      for (let i = 0; i < chars.length; i++) {
+        result.push({
+          char: chars[i],
+          startMs: lastEnd + i * msPerChar,
+          endMs: lastEnd + (i + 1) * msPerChar,
+        })
+      }
+      console.log(`[autosync] Extrapolated ${chars.length} chars from null-timestamp chunk`)
+      continue
+    }
     const startMs = c.timestamp[0] * 1000
     const endMs = c.timestamp[1] * 1000
     if (endMs - startMs < 50) continue
@@ -280,11 +366,11 @@ export async function POST(
     const audioDurationMs = Math.round((audio.length / 16000) * 1000)
 
     const lang = LANG_MAP[book.language ?? 'zh'] ?? 'chinese'
-    const chunks = await transcribe(audio, lang)
-    console.log(`[autosync] ${chunks.length} Whisper segments`)
+    const { chunks, wordLevel } = await transcribe(audio, lang)
+    console.log(`[autosync] ${chunks.length} Whisper segments (${wordLevel ? 'word-level' : 'chunk-level'})`)
 
     // ── Stage 1: Build transcript character timeline ──
-    const transcriptChars = buildTranscriptChars(chunks)
+    const transcriptChars = buildTranscriptChars(chunks, wordLevel)
     console.log(`[autosync] Stage 1: ${transcriptChars.length} transcript chars, ` +
       `${transcriptChars[0]?.startMs ?? 0}ms – ${transcriptChars[transcriptChars.length - 1]?.endMs ?? 0}ms`)
 
@@ -351,7 +437,8 @@ export async function POST(
     const lines: string[] = []
     lines.push(`=== AUTOSYNC v2 DEBUG: ${bookId} ===`)
     lines.push(`Audio: ${(audioDurationMs / 1000).toFixed(1)}s | Title: "${book.title}"`)
-    lines.push(`Whisper chunks: ${chunks.length} → ${transcriptChars.length} CJK chars (after dedup)`)
+    lines.push(`Timestamp mode: ${wordLevel ? 'word-level (per-character)' : 'chunk-level (interpolated)'}`)
+    lines.push(`Whisper chunks: ${chunks.length} → ${transcriptChars.length} CJK chars${wordLevel ? '' : ' (after dedup)'}`)
     lines.push(`OCR chars: ${pages.flatMap(p => p.words).flatMap(w => cjkChars(w.text)).length}`)
     lines.push(`Matched: ${matchedCount} (${exactCount} exact, ${matchedCount - exactCount} substitution)`)
     lines.push(`Unmatched transcript chars: ${transcriptChars.length - matchedCount}`)
@@ -373,6 +460,7 @@ export async function POST(
     writeFileSync(path.join(transcriptDir, `${bookId}.txt`), lines.join('\n'))
     writeFileSync(path.join(transcriptDir, `${bookId}.json`), JSON.stringify({
       version: 2,
+      wordLevel,
       audioDurationMs,
       transcriptChars: transcriptChars.length,
       ocrChars: pages.flatMap(p => p.words).flatMap(w => cjkChars(w.text)).length,
@@ -390,6 +478,7 @@ export async function POST(
     return NextResponse.json({
       ok: true,
       version: 2,
+      wordLevel,
       transcriptChars: transcriptChars.length,
       matched: matchedCount,
       exact: exactCount,
