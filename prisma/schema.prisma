@@ -142,3 +142,10 @@ model ExerciseResult {
   session ExerciseSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   word    Word            @relation(fields: [wordId], references: [id], onDelete: Cascade)
 }
+
+// ── Settings (key-value store for API keys and provider selection) ────────────
+
+model Setting {
+  key   String @id
+  value String
+}
